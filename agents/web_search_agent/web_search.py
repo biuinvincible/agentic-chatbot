@@ -1,4 +1,4 @@
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import HumanMessage, AIMessage
 from langchain_core.prompts import PromptTemplate
 from langchain_core.runnables import Runnable
 from langgraph.graph import MessagesState
@@ -49,13 +49,19 @@ def web_search_agent(state: UnifiedState, llm) -> UnifiedState: # Return Unified
     # Get the last 6 messages except the last one (the current query)
     # Limit the history to prevent overly long prompts
     conversation_history_messages = state["messages"][-7:-1]  # Last 6 messages excluding current
-    # Format history into a string. Simple approach: join message contents.
-    # A more sophisticated approach could use roles (user/assistant) and structure.
-    conversation_history_str = "\n".join(
-        f"{getattr(msg, 'name', 'User/Assistant')}: {msg.content}" 
-        for msg in conversation_history_messages 
-        if hasattr(msg, 'content') and msg.content
-    )
+    # Format history with clear role distinction
+    formatted_history = []
+    for msg in conversation_history_messages:
+        if hasattr(msg, 'content') and msg.content:
+            # Determine the role based on message type for better clarity
+            if isinstance(msg, HumanMessage):
+                role = "User"
+            elif isinstance(msg, AIMessage):
+                role = "Assistant"
+            else:
+                role = getattr(msg, 'name', 'User/Assistant') or 'User/Assistant'
+            formatted_history.append(f"{role}: {msg.content}")
+    conversation_history_str = "\n".join(formatted_history)
     # Handle case where there's no prior history
     if not conversation_history_str:
         conversation_history_str = "No previous conversation history."
@@ -173,7 +179,7 @@ def web_search_agent(state: UnifiedState, llm) -> UnifiedState: # Return Unified
     # Add the result to the state
     # Return a dict that updates both messages and last_agent_outcome
     return {
-        "messages": state["messages"] + [HumanMessage(content=response_text, name="WebSearchAgent")],
+        "messages": state["messages"] + [AIMessage(content=response_text, name="WebSearchAgent")],
         "last_agent_outcome": outcome_info, # Add the outcome information
         "next": "supervisor"  # Return control to supervisor
         # Task update is handled by the supervisor based on this outcome.

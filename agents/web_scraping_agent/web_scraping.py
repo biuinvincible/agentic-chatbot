@@ -1,4 +1,4 @@
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import HumanMessage, AIMessage
 from langchain_core.prompts import PromptTemplate
 from agents.web_scraping_agent.tools.scraping_tool import get_scraped_content
 # Import unified state
@@ -57,7 +57,7 @@ def web_scraping_agent(state: UnifiedState, llm) -> UnifiedState:  # Return Unif
     if not urls:
         response_text = "Web Scraping Agent Error:\nNo URLs found to scrape. Please provide URLs to scrape."
         print("[WebScraping] No URLs found to scrape")
-        return {"messages": state["messages"] + [HumanMessage(content=response_text, name="WebScrapingAgent")], "next": "supervisor"}
+        return {"messages": state["messages"] + [AIMessage(content=response_text, name="WebScrapingAgent")], "next": "supervisor"}
         
     print(f"[WebScraping] Found {len(urls)} URLs to scrape")
     
@@ -126,7 +126,7 @@ def web_scraping_agent(state: UnifiedState, llm) -> UnifiedState:  # Return Unif
     # Add the result to the state
     # Return a dict that updates both messages and last_agent_outcome
     return {
-        "messages": state["messages"] + [HumanMessage(content=response_text, name="WebScrapingAgent")],
+        "messages": state["messages"] + [AIMessage(content=response_text, name="WebScrapingAgent")],
         "last_agent_outcome": outcome_info,  # Add the outcome information
         "next": "supervisor"  # Return control to supervisor
         # Task update is handled by the supervisor based on this outcome.

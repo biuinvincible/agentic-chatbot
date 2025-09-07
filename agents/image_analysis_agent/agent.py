@@ -1,4 +1,4 @@
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import HumanMessage, AIMessage
 from langchain_core.prompts import PromptTemplate
 import base64
 import os
@@ -113,7 +113,7 @@ def image_analysis_agent(state: UnifiedState, llm) -> UnifiedState:
             print(f"Image file not found at path: {image_file_path}")
             response_text = f"Image Analysis Agent Error:\nI detected that you've uploaded an image file, but I couldn't find it at the expected location ({image_file_path}). This might be because the file was cleaned up after upload. Please try uploading the image again and ask your question immediately after uploading."
             print(f"Returning error response: {response_text}")
-            return {"messages": state["messages"] + [HumanMessage(content=response_text, name="ImageAnalysisAgent")]}
+            return {"messages": state["messages"] + [AIMessage(content=response_text, name="ImageAnalysisAgent")]}
             
         print(f"Processing image file: {image_file_path}")
         # Create a more general task if the user is just asking about the image file
@@ -143,7 +143,7 @@ def image_analysis_agent(state: UnifiedState, llm) -> UnifiedState:
         else:
             response_text = "Image Analysis Agent Error:\nNo documents have been uploaded for analysis. To analyze an image, please upload an image file (PNG, JPG, JPEG, etc.) first, then ask your question about it."
         print("[ImageAnalysis] Returning error response")
-        return {"messages": state["messages"] + [HumanMessage(content=response_text, name="ImageAnalysisAgent")]}
+        return {"messages": state["messages"] + [AIMessage(content=response_text, name="ImageAnalysisAgent")]}
     
     # Format the response
     response_text = f"Image Analysis Result:\n{analysis_result.content if hasattr(analysis_result, 'content') else str(analysis_result)}"
@@ -159,7 +159,7 @@ def image_analysis_agent(state: UnifiedState, llm) -> UnifiedState:
     
     # Add the result to the state and return control to supervisor
     return {
-        "messages": state["messages"] + [HumanMessage(content=response_text, name="ImageAnalysisAgent")],
+        "messages": state["messages"] + [AIMessage(content=response_text, name="ImageAnalysisAgent")],
         "last_agent_outcome": outcome_info,  # Add the outcome information
         "next": "supervisor"  # Return control to supervisor
     }

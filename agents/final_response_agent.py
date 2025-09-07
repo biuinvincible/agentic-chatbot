@@ -1,24 +1,24 @@
 """Final Response Agent for the Agentic Assistant."""
 
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.prompts import PromptTemplate
 from langchain_core.runnables import Runnable
 # Import unified state
 from agents.state import UnifiedState
 
-# Define the final response prompt with conversation history
+# Define the final response prompt with focused information
 final_response_prompt = PromptTemplate.from_template(
     "You are the 'Final Response Agent'.\n"
-    "Your role is to generate the final polished response to the user based on the complete conversation.\n\n"
+    "Your role is to generate the final polished response to the user based on web search results.\n\n"
+    "Current User Question: {current_user_message}\n\n"
+    "Recent Web Search Results: {web_search_results}\n\n"
     "Instructions:\n"
-    "1. Read the complete conversation history carefully\n"
-    "2. Identify what the user is asking RIGHT NOW\n"
-    "3. Provide a clear, comprehensive, and well-structured response to the current question\n"
+    "1. Provide a clear, comprehensive response that directly addresses the user's current question\n"
+    "2. Use only the provided web search results as your source of information\n"
+    "3. If the user's question is a modification of a previous request, adjust your response accordingly\n"
     "4. Use a professional and helpful tone\n\n"
-    "Complete Conversation History:\n"
-    "{history}\n\n"
-    "What is the user asking right now and how should you respond?\n"
-    "Your final response:\n"
+    "Your response should be comprehensive and well-structured.\n"
+    "Your final response:"
 )
 
 async def final_response_agent(state: UnifiedState, llm) -> UnifiedState:
@@ -42,31 +42,44 @@ async def final_response_agent(state: UnifiedState, llm) -> UnifiedState:
                 }
             }
         
-        # Format conversation history the same way supervisor does
-        formatted_history = []
-        for msg in messages:
-            if hasattr(msg, 'content') and msg.content:
-                role = getattr(msg, 'name', 'User/Assistant') or 'User/Assistant'
-                formatted_history.append(f"{role}: {msg.content}")
+        # Debug: Print the conversation history being passed
+        print("[FinalResponse] Conversation history:")
+        for i, msg in enumerate(messages):
+            msg_type = "HUMAN" if isinstance(msg, HumanMessage) else "AI" if isinstance(msg, AIMessage) else "OTHER"
+            agent_name = getattr(msg, 'name', 'Unknown') if hasattr(msg, 'name') else 'Unknown'
+            print(f"  [{i}] {msg_type} ({agent_name}): {msg.content[:100]}...")
         
-        conversation_history = "\n".join(formatted_history)
+        # Extract the most recent WebSearchAgent results
+        web_search_results = None
+        current_user_message = None
         
-        # Handle case where there's no prior history
-        if not conversation_history:
-            conversation_history = "No previous conversation history."
+        # Look through messages in reverse order to find the most recent ones
+        for msg in reversed(messages):
+            if isinstance(msg, AIMessage) and getattr(msg, 'name', '') == 'WebSearchAgent' and web_search_results is None:
+                web_search_results = msg.content
+            elif isinstance(msg, HumanMessage) and current_user_message is None:
+                current_user_message = msg.content
         
-        # Limit length to prevent token overflow (same as supervisor)
-        max_history_length = 1500
-        if len(conversation_history) > max_history_length:
-            conversation_history = conversation_history[:max_history_length] + "... (history truncated)"
+        # Fallbacks
+        if web_search_results is None:
+            web_search_results = "No recent web search results available."
+        if current_user_message is None:
+            current_user_message = "No current user message found."
         
-        # Generate the final response using the LLM with enhanced context
+        print(f"[FinalResponse] Current user message: {current_user_message[:100]}...")
+        print(f"[FinalResponse] Most recent web search results: {web_search_results[:100]}...")
+        
+        # Generate the final response using the LLM with focused context
         response_chain: Runnable = final_response_prompt | llm
         response_result = response_chain.invoke({
-            "history": conversation_history
+            "current_user_message": current_user_message,
+            "web_search_results": web_search_results
         })
         
         final_response_text = response_result.content if hasattr(response_result, 'content') else str(response_result)
+        
+        # Debug: Print the generated response
+        print(f"[FinalResponse] Generated response: {final_response_text[:200]}...")
         
         print("[FinalResponse] Response generated successfully")
         

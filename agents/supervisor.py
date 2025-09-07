@@ -382,14 +382,20 @@ Provide your routing decision in a structured JSON format with the next agent an
         return None
 
 def _format_conversation_history(messages) -> str:
-    """Format conversation history for LLM context."""
+    """Format conversation history for LLM context with clear role distinction."""
     if not messages:
         return "No previous conversation history."
     
     formatted_history = []
     for msg in messages:
         if hasattr(msg, 'content') and msg.content:
-            role = getattr(msg, 'name', 'User/Assistant') or 'User/Assistant'
+            # Determine the role based on message type for better clarity
+            if isinstance(msg, HumanMessage):
+                role = "User"
+            elif isinstance(msg, AIMessage):
+                role = "Assistant"
+            else:
+                role = getattr(msg, 'name', 'User/Assistant') or 'User/Assistant'
             formatted_history.append(f"{role}: {msg.content}")
     
     history_str = "\n".join(formatted_history)
