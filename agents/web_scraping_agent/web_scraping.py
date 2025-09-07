@@ -40,6 +40,9 @@ def web_scraping_agent(state: UnifiedState, llm) -> UnifiedState:  # Return Unif
     last_message = state["messages"][-1]
     original_query = last_message.content if hasattr(last_message, 'content') else str(last_message)
     
+    # Get the last 6 messages for context (excluding the current message)
+    conversation_context_messages = state["messages"][-7:-1]  # Last 6 messages excluding current
+    
     # Extract URLs from the message content (assuming they're in a list format)
     # This is a simple regex-based approach; in a real implementation, you might want to parse more carefully
     import re

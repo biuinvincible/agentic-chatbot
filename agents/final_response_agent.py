@@ -6,18 +6,18 @@ from langchain_core.runnables import Runnable
 # Import unified state
 from agents.state import UnifiedState
 
-# Define the final response prompt
+# Define the final response prompt with conversation history
 final_response_prompt = PromptTemplate.from_template(
     "You are the 'Final Response Agent'.\n"
-    "Your role is to generate the final polished response to the user's query based on the conversation history.\n\n"
+    "Your role is to generate the final polished response to the user based on the complete conversation.\n\n"
     "Instructions:\n"
-    "- Provide a clear, comprehensive, and well-structured response\n"
-    "- Synthesize information from previous agent responses if available\n"
-    "- Ensure your response directly addresses the user's original query\n"
-    "- Use a professional and helpful tone\n"
-    "- If there were errors or limitations in previous steps, acknowledge them transparently\n\n"
-    "Conversation History:\n{history}\n\n"
-    "The user's original query was: '{query}'\n\n"
+    "1. Read the complete conversation history carefully\n"
+    "2. Identify what the user is asking RIGHT NOW\n"
+    "3. Provide a clear, comprehensive, and well-structured response to the current question\n"
+    "4. Use a professional and helpful tone\n\n"
+    "Complete Conversation History:\n"
+    "{history}\n\n"
+    "What is the user asking right now and how should you respond?\n"
     "Your final response:\n"
 )
 
@@ -28,7 +28,7 @@ async def final_response_agent(state: UnifiedState, llm) -> UnifiedState:
     print("[FinalResponse] Generating final response...")
     
     try:
-        # Get the last user message as the query
+        # Get all messages from state
         messages = state.get("messages", [])
         if not messages:
             error_msg = "No messages found for final response."
@@ -42,39 +42,28 @@ async def final_response_agent(state: UnifiedState, llm) -> UnifiedState:
                 }
             }
         
-        # Get the last human message as the original query
-        original_query = ""
-        for msg in reversed(messages):
-            if hasattr(msg, 'type') and msg.type == "human":
-                original_query = msg.content if hasattr(msg, 'content') else str(msg)
-                break
+        # Format conversation history the same way supervisor does
+        formatted_history = []
+        for msg in messages:
+            if hasattr(msg, 'content') and msg.content:
+                role = getattr(msg, 'name', 'User/Assistant') or 'User/Assistant'
+                formatted_history.append(f"{role}: {msg.content}")
         
-        if not original_query:
-            # Fallback to the last message
-            last_message = messages[-1]
-            original_query = last_message.content if hasattr(last_message, 'content') else str(last_message)
-        
-        # Format conversation history
-        conversation_history = "\n".join([
-            f"{getattr(msg, 'name', 'User/Assistant')}: {msg.content}" 
-            for msg in messages 
-            if hasattr(msg, 'content') and msg.content
-        ])
+        conversation_history = "\n".join(formatted_history)
         
         # Handle case where there's no prior history
         if not conversation_history:
             conversation_history = "No previous conversation history."
         
-        # Limit length to prevent token overflow
-        max_history_length = 2000 
+        # Limit length to prevent token overflow (same as supervisor)
+        max_history_length = 1500
         if len(conversation_history) > max_history_length:
             conversation_history = conversation_history[:max_history_length] + "... (history truncated)"
         
-        # Generate the final response using the LLM
+        # Generate the final response using the LLM with enhanced context
         response_chain: Runnable = final_response_prompt | llm
         response_result = response_chain.invoke({
-            "history": conversation_history,
-            "query": original_query
+            "history": conversation_history
         })
         
         final_response_text = response_result.content if hasattr(response_result, 'content') else str(response_result)

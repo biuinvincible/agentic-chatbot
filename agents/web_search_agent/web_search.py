@@ -46,9 +46,9 @@ def web_search_agent(state: UnifiedState, llm) -> UnifiedState: # Return Unified
     original_query = last_message.content if hasattr(last_message, 'content') else str(last_message)
     
     # --- NEW: Prepare conversation history for the LLM prompt ---
-    # Get all messages except the last one (the current query)
+    # Get the last 6 messages except the last one (the current query)
     # Limit the history to prevent overly long prompts
-    conversation_history_messages = state["messages"][:-1] 
+    conversation_history_messages = state["messages"][-7:-1]  # Last 6 messages excluding current
     # Format history into a string. Simple approach: join message contents.
     # A more sophisticated approach could use roles (user/assistant) and structure.
     conversation_history_str = "\n".join(

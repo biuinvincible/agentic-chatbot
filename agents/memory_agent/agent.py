@@ -94,10 +94,10 @@ def memory_management_agent(state: UnifiedState, llm, store=None) -> UnifiedStat
     last_message = state["messages"][-1]
     task = last_message.content if hasattr(last_message, 'content') else str(last_message)
     
-    # Get conversation context
+    # Get conversation context (last 6 messages)
     conversation_context = "\n".join([
         f"{msg.type if hasattr(msg, 'type') else 'unknown'}: {msg.content if hasattr(msg, 'content') else str(msg)}"
-        for msg in state["messages"][-5:]  # Last 5 messages for better context
+        for msg in state["messages"][-6:]  # Last 6 messages for better context
     ])
     
     # Extract memories to store

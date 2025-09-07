@@ -171,6 +171,9 @@ async def rag_agent(state: UnifiedState, llm, extract_document_reference: bool =
     # Get the last message (user's question)
     last_message = state["messages"][-1]
     question = last_message.content if hasattr(last_message, 'content') else str(last_message)
+    
+    # Get the last 6 messages for context (excluding the current message)
+    conversation_context_messages = state["messages"][-7:-1]  # Last 6 messages excluding current
     logger.info(f"User question: {question}")
     
     # Get document information from state
@@ -221,7 +224,7 @@ async def rag_agent(state: UnifiedState, llm, extract_document_reference: bool =
                 question, 
                 document_info_list, 
                 detection_llm, 
-                state.get("messages", [])
+                state.get("messages", [])[-6:] if state.get("messages") else []  # Last 6 messages
             )
             
             if target_document:

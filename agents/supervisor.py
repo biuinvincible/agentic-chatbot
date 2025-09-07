@@ -42,7 +42,7 @@ class SupervisorRoutingDecision(BaseModel):
     )
     task: str = Field(
         ..., 
-        description="Specific task instruction for the target agent to execute"
+        description="Specific task instruction for the target agent to execute. Should include only the necessary context for this agent to perform its specialized function."
     )
     reasoning: str = Field(
         ..., 
@@ -63,7 +63,8 @@ async def deep_research_agent(state: dict, llm=None) -> dict:
         print("[DeepResearch] Starting enhanced local deep research...")
         
         # Prepare input for the enhanced local deep research agent
-        input_messages = state.get("messages", [])
+        all_input_messages = state.get("messages", [])
+        input_messages = all_input_messages[-6:] if len(all_input_messages) > 6 else all_input_messages  # Last 6 messages
         session_id = state.get("session_id", f"session_{int(datetime.now().timestamp())}")
         
         # Prepare configuration
@@ -188,11 +189,22 @@ ALWAYS CAREFULLY EXAMINE THE USER'S QUERY FOR URLs THAT BEGIN WITH http:// OR ht
 If you detect any URLs in the user's query, you MUST route to the web_scraping_agent
 This is the HIGHEST PRIORITY routing rule - URLs in queries always require scraping
 
+TASK CREATION GUIDELINES:
+When creating tasks for agents, you should:
+1. Provide ONLY the specific information needed for that agent to perform its function
+2. Include relevant context but avoid overwhelming the agent with unnecessary history
+3. Clearly specify what you want the agent to accomplish
+4. Reference specific documents, URLs, or previous findings when relevant
+5. Avoid duplicating work that has already been completed
+
+Example good task for web_search_agent: "Search for laptops suitable for computer science students with dedicated GPUs and prices between $2000-$3000"
+Example good task for rag_agent: "Based on the uploaded syllabus document, summarize the key topics that will be covered in the first month of the course"
+
 Make your routing decision based on the most appropriate agent for the current step in the workflow. Consider what information is needed and which agent is best equipped to provide it.
 
 You must respond with a structured JSON object containing:
 - next_agent: The name of the agent to route to (must be one of the available agents)
-- task: A clear, specific instruction for the target agent to execute based on the user's request
+- task: A clear, specific instruction for the target agent to execute based on the user's request. Should be focused and include only necessary context.
 - reasoning: A clear explanation of why you chose this agent and what task you're assigning
 """
 
@@ -209,7 +221,8 @@ def supervisor_agent(state: UnifiedState, llm) -> dict:
         return {"next": user_forced_agent}
     
     # 2. Safety check for empty messages (prevent errors)
-    messages = state.get("messages", [])
+    all_messages = state.get("messages", [])
+    messages = all_messages[-6:] if len(all_messages) > 6 else all_messages  # Last 6 messages
     if not messages:
         return {"next": "final_response_agent"}
     
@@ -228,7 +241,8 @@ def supervisor_agent(state: UnifiedState, llm) -> dict:
     
     # Check if we've already performed a web search and have results
     last_agent_outcome = state.get("last_agent_outcome", {})
-    messages = state.get("messages", [])
+    all_messages = state.get("messages", [])
+    messages = all_messages[-6:] if len(all_messages) > 6 else all_messages  # Last 6 messages
     
     # If the last agent was web_search_agent and we have messages, consider moving to final response
     if (last_agent_outcome.get("agent") == "web_search_agent" and 
@@ -301,9 +315,10 @@ def _structured_llm_routing(state: UnifiedState, query: str, llm) -> Optional[Su
         from langchain_ollama import ChatOllama
         from langchain_core.prompts import PromptTemplate
         
-        # Prepare conversation history
-        messages = state.get("messages", [])
-        conversation_history = _format_conversation_history(messages[:-1])  # Exclude current query
+        # Prepare conversation history (last 6 messages)
+        all_messages = state.get("messages", [])
+        recent_messages = all_messages[-7:-1] if len(all_messages) > 7 else all_messages[:-1] if len(all_messages) > 1 else []
+        conversation_history = _format_conversation_history(recent_messages)  # Last 6 messages excluding current query
         
         # Prepare document context
         document_info = state.get("document_info", [])
@@ -550,7 +565,8 @@ def _determine_post_search_action(state: UnifiedState) -> str:
 
 def _fallback_routing(state: UnifiedState) -> str:
     """Fallback routing when the specified next agent is invalid."""
-    messages = state.get("messages", [])
+    all_messages = state.get("messages", [])
+    messages = all_messages[-6:] if len(all_messages) > 6 else all_messages  # Last 6 messages
     document_info = state.get("document_info", [])
     
     if not messages:

@@ -86,6 +86,9 @@ def image_analysis_agent(state: UnifiedState, llm) -> UnifiedState:
     task = last_message.content if hasattr(last_message, 'content') else str(last_message)
     print("[ImageAnalysis] Processing image task...")
     
+    # Get the last 6 messages for context (excluding the current message)
+    conversation_context_messages = state["messages"][-7:-1]  # Last 6 messages excluding current
+    
     # Check if we have document info with an image file
     document_info = state.get("document_info", [])
     image_file_path = None
