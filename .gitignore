@@ -1,0 +1,154 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# IDEs and editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# Database files (if using local SQLite for checkpoints)
+*.db
+checkpoints.db
+checkpoints.db-shm
+checkpoints.db-wal
+
+# Chroma DB files
+chroma_db/
+
+# Gradio temporary files
+gradio_cached_examples/
+gradio_launches/
+
+# Log files
+*.log
+logs/
+
+# Environment files (critical for security)
+.env
+.env.local
+.env.*.local
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+
+# Documentation
+docs/_build/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# IPython
+profile_default/
+ipython_config.py
+
+# pyenv
+.python-version
+
+# pipenv
+Pipfile.lock
+
+# PEP 582
+__pypackages__/
+
+# Celery stuff (if applicable)
+celerybeat-schedule
+celerybeat.pid
+
+# SageMath parsed files
+*.sage.py
+
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak
+venv.bak
+
+# Spyder project settings
+.spyderproject
+.spyproject
+
+# Rope project settings
+.ropeproject
+
+# mkdocs documentation
+/site
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Pyre type checker
+.pyre/
+
+# Node.js dependencies
+node_modules/
+
+# Uploaded files
+uploads/
+
+# Temporary files
+*.tmp
+*.temp
+temp_*
+
+# Deep research directories
+local_deep_research/
+open_deep_research/
+
+# Environment files in subdirectories
+.env
+
+# Example environment files
+.env.example
+
+# Vite temporary files
+.vite-temp
+
+# Package lock files in subdirectories
+.package-lock.json
