@@ -29,6 +29,7 @@ from langchain_ollama import ChatOllama
 from langchain_core.messages import HumanMessage, BaseMessage, AIMessage
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.store.memory import InMemoryStore
+from langgraph.errors import GraphInterrupt
 # Use the supervisor with deep search for enhanced capabilities
 from agents.supervisor import create_agent_graph
 from agents.file_processing.workflow import DocumentProcessor
@@ -435,6 +436,8 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks):
         }
             
         config = {"configurable": {"thread_id": request.session_id}}
+        # Pass the config through to agents
+        input_dict["config"] = config
         logger.info(f"Invoking agent graph with session: {request.session_id}")
         
         result = await target_graph.ainvoke(input_dict, config)
@@ -521,9 +524,108 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks):
         
         return response
         
+    except GraphInterrupt as e:
+        # Handle interrupt for clarification
+        print(f"[Backend] Caught GraphInterrupt: {e}")
+        interrupts = getattr(e, 'interrupts', [])
+        print(f"[Backend] Interrupts: {interrupts}")
+        if interrupts:
+            # Extract the interrupt value
+            interrupt_value = interrupts[0].value if hasattr(interrupts[0], 'value') else {}
+            print(f"[Backend] Interrupt value: {interrupt_value}")
+            if isinstance(interrupt_value, dict) and interrupt_value.get("type") == "clarification_request":
+                clarification_question = interrupt_value.get("question", "Please provide clarification:")
+                print(f"[Backend] Returning clarification question: {clarification_question}")
+                
+                # Return the clarification question to the user
+                return ChatResponse(
+                    response=clarification_question,
+                    session_id=request.session_id,
+                    document_info=request.document_info,
+                    messages=[
+                        ChatMessage(role="user", content=request.message),
+                        ChatMessage(role="assistant", content=clarification_question)
+                    ]
+                )
+        # Re-raise if not a clarification interrupt
+        print(f"[Backend] Re-raising interrupt")
+        raise e
+        
     except Exception as e:
         print(f"BACKEND API ERROR: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error processing request: {str(e)}")
+
+
+@app.post("/chat/resume", response_model=ChatResponse)
+async def resume_chat(request: ChatRequest):
+    """Resume an interrupted workflow with user input."""
+    global graph
+    
+    if not graph:
+        raise HTTPException(status_code=500, detail="LLM not initialized")
+    
+    try:
+        # Get the user's response from the message
+        user_response = request.message
+        
+        # Resume the interrupted workflow with user input
+        config = {"configurable": {"thread_id": request.session_id}}
+        
+        # Use Command to resume with the user's response
+        from langgraph.types import Command
+        resume_command = Command(resume=user_response)
+        
+        result = await graph.ainvoke(resume_command, config)
+        
+        # Process result the same way as the regular chat endpoint
+        final_message = result["messages"][-1]
+        response_content = final_message.content
+        
+        # Format messages for response
+        messages = [
+            ChatMessage(role="user", content=user_response),
+            ChatMessage(role="assistant", content=response_content)
+        ]
+        
+        response = ChatResponse(
+            response=response_content,
+            session_id=request.session_id,
+            document_info=request.document_info,
+            messages=messages
+        )
+        
+        # Save to conversation history
+        try:
+            async with aiosqlite.connect("checkpoints.db") as conn:
+                # Save user message
+                await conn.execute(
+                    "INSERT INTO messages (conversation_id, role, content) VALUES (?, ?, ?)",
+                    (request.session_id, "user", user_response)
+                )
+                
+                # Save assistant response
+                await conn.execute(
+                    "INSERT INTO messages (conversation_id, role, content) VALUES (?, ?, ?)",
+                    (request.session_id, "assistant", response_content)
+                )
+                
+                # Update conversation timestamp
+                await conn.execute(
+                    "UPDATE conversations SET updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    (request.session_id,)
+                )
+                
+                await conn.commit()
+        except Exception as e:
+            print(f"Error saving conversation history: {e}")
+            # Don't fail the request if history saving fails
+        
+        return response
+        
+    except Exception as e:
+        print(f"BACKEND API ERROR: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error processing request: {str(e)}")
+
 
 @app.post("/upload-document", response_model=DocumentProcessResponse)
 async def upload_document(

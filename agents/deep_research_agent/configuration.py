@@ -356,6 +356,17 @@ class Configuration(BaseModel):
         }
     )
 
+    use_interactive_clarification: bool = Field(
+        default=False,
+        metadata={
+            "x_oap_ui_config": {
+                "type": "boolean",
+                "default": False,
+                "description": "Whether to use interactive clarification that waits for user input during research"
+            }
+        }
+    )
+
 
     @classmethod
     def from_runnable_config(

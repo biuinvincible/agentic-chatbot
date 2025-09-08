@@ -9,14 +9,16 @@ from agents.state import UnifiedState
 # Define the final response prompt with focused information
 final_response_prompt = PromptTemplate.from_template(
     "You are the 'Final Response Agent'.\n"
-    "Your role is to generate the final polished response to the user based on web search results.\n\n"
+    "Your role is to generate the final polished response to the user based on research results.\n\n"
     "Current User Question: {current_user_message}\n\n"
-    "Recent Web Search Results: {web_search_results}\n\n"
+    "Research Results: {research_results}\n\n"
     "Instructions:\n"
     "1. Provide a clear, comprehensive response that directly addresses the user's current question\n"
-    "2. Use only the provided web search results as your source of information\n"
+    "2. Use the provided research results as your source of information\n"
     "3. If the user's question is a modification of a previous request, adjust your response accordingly\n"
-    "4. Use a professional and helpful tone\n\n"
+    "4. Use a professional and helpful tone\n"
+    "5. If the research results are from a deep research agent, they may be comprehensive and detailed\n"
+    "6. If the research results indicate no relevant information was found, explain this clearly\n\n"
     "Your response should be comprehensive and well-structured.\n"
     "Your final response:"
 )
@@ -49,31 +51,37 @@ async def final_response_agent(state: UnifiedState, llm) -> UnifiedState:
             agent_name = getattr(msg, 'name', 'Unknown') if hasattr(msg, 'name') else 'Unknown'
             print(f"  [{i}] {msg_type} ({agent_name}): {msg.content[:100]}...")
         
-        # Extract the most recent WebSearchAgent results
-        web_search_results = None
+        # Extract the most recent research results from any agent
+        research_results = None
         current_user_message = None
         
         # Look through messages in reverse order to find the most recent ones
         for msg in reversed(messages):
-            if isinstance(msg, AIMessage) and getattr(msg, 'name', '') == 'WebSearchAgent' and web_search_results is None:
-                web_search_results = msg.content
+            if isinstance(msg, AIMessage) and current_user_message is None:
+                # Check if this is a message from any research agent
+                agent_name = getattr(msg, 'name', '')
+                if agent_name in ['WebSearchAgent', 'DeepResearchAgent', 'RAGAgent', 'WebScrapingAgent'] and research_results is None:
+                    research_results = msg.content
+                elif agent_name == '' and research_results is None:
+                    # Fallback: if no named agent, use the last AI message
+                    research_results = msg.content
             elif isinstance(msg, HumanMessage) and current_user_message is None:
                 current_user_message = msg.content
         
         # Fallbacks
-        if web_search_results is None:
-            web_search_results = "No recent web search results available."
+        if research_results is None:
+            research_results = "No recent research results available."
         if current_user_message is None:
             current_user_message = "No current user message found."
         
         print(f"[FinalResponse] Current user message: {current_user_message[:100]}...")
-        print(f"[FinalResponse] Most recent web search results: {web_search_results[:100]}...")
+        print(f"[FinalResponse] Most recent research results: {research_results[:100]}...")
         
         # Generate the final response using the LLM with focused context
         response_chain: Runnable = final_response_prompt | llm
         response_result = response_chain.invoke({
             "current_user_message": current_user_message,
-            "web_search_results": web_search_results
+            "research_results": research_results
         })
         
         final_response_text = response_result.content if hasattr(response_result, 'content') else str(response_result)

@@ -67,12 +67,20 @@ async def deep_research_agent(state: dict, llm=None) -> dict:
         input_messages = all_input_messages[-6:] if len(all_input_messages) > 6 else all_input_messages  # Last 6 messages
         session_id = state.get("session_id", f"session_{int(datetime.now().timestamp())}")
         
-        # Prepare configuration
-        config = {
-            "configurable": {
-                "thread_id": session_id
+        # Prepare configuration - pass through the main configuration if available
+        if "config" in state:
+            config = state["config"]
+            # Ensure thread_id is set
+            if "configurable" not in config:
+                config["configurable"] = {}
+            config["configurable"]["thread_id"] = session_id
+        else:
+            config = {
+                "configurable": {
+                    "thread_id": session_id,
+                    "use_interactive_clarification": True  # Enable interactive clarification by default
+                }
             }
-        }
         
         # Prepare input for deep_researcher_local_deep_research
         research_input = {
@@ -86,17 +94,39 @@ async def deep_research_agent(state: dict, llm=None) -> dict:
         # Run the enhanced local deep research agent with progress tracking
         result = await progress_tracking_researcher.ainvoke(research_input, config)
         
-        # Extract the final report
-        final_report = result.get("final_report", "")
+        # Extract the final report - try multiple approaches for robustness
+        final_report = ""
+        
+        # Approach 1: Check if final_report key exists and has content
+        if isinstance(result, dict):
+            final_report = result.get("final_report", "")
+            
+            # Approach 2: If final_report is empty, look in messages
+            if not final_report and "messages" in result:
+                messages = result["messages"]
+                if messages:
+                    # Get the last message that has content
+                    for msg in reversed(messages):
+                        if hasattr(msg, 'content') and msg.content:
+                            final_report = msg.content
+                            break
+            
+            # Approach 3: If still empty, try to synthesize from other fields
+            if not final_report:
+                # Try to create a report from research notes
+                notes = result.get("notes", [])
+                if notes:
+                    final_report = "Research Findings:\n" + "\n".join(notes)
+        
         final_message = AIMessage(content=final_report, name="DeepResearchAgent")
         
-        print("[DeepResearch] Research completed successfully")
+        print(f"[DeepResearch] Research completed successfully with {len(final_report)} characters of content")
         
         # Report outcome for supervisor routing
         outcome_info = {
             "agent": "deep_research_agent",
             "status": "completed",
-            "details": "Enhanced local deep research completed successfully"
+            "details": f"Enhanced local deep research completed successfully with {len(final_report)} characters of content"
         }
         
         return {
@@ -250,6 +280,41 @@ def supervisor_agent(state: UnifiedState, llm) -> dict:
         len(messages) >= 2):
         print("[Supervisor] Web search completed, moving to final response")
         return {"next": "final_response_agent"}
+        
+    # If the last agent was web_scraping_agent and we have messages, consider moving to final response
+    if (last_agent_outcome.get("agent") == "web_scraping_agent" and 
+        last_agent_outcome.get("status") == "completed" and
+        len(messages) >= 2):
+        print("[Supervisor] Web scraping completed, moving to final response")
+        return {"next": "final_response_agent"}
+        
+    # If the last agent was rag_agent and we have messages, consider moving to final response
+    if (last_agent_outcome.get("agent") == "rag_agent" and 
+        last_agent_outcome.get("status") == "completed" and
+        len(messages) >= 2):
+        print("[Supervisor] RAG analysis completed, moving to final response")
+        return {"next": "final_response_agent"}
+        
+    # If the last agent was image_analysis_agent and we have messages, consider moving to final response
+    if (last_agent_outcome.get("agent") == "image_analysis_agent" and 
+        last_agent_outcome.get("status") == "completed" and
+        len(messages) >= 2):
+        print("[Supervisor] Image analysis completed, moving to final response")
+        return {"next": "final_response_agent"}
+        
+    # If the last agent was memory_agent and we have messages, consider moving to final response
+    if (last_agent_outcome.get("agent") == "memory_agent" and 
+        last_agent_outcome.get("status") == "completed" and
+        len(messages) >= 2):
+        print("[Supervisor] Memory management completed, moving to final response")
+        return {"next": "final_response_agent"}
+        
+    # If the last agent was deep_research_agent and we have messages, consider moving to final response
+    if (last_agent_outcome.get("agent") == "deep_research_agent" and 
+        last_agent_outcome.get("status") == "completed" and
+        len(messages) >= 2):
+        print("[Supervisor] Deep research completed, moving to final response")
+        return {"next": "final_response_agent"}
     
     # Use advanced LLM-based routing with structured output as the primary approach
     try:
@@ -290,6 +355,32 @@ def _minimal_fallback_routing(state: UnifiedState, query: str) -> str:
     query_lower = query.lower()
     document_info = state.get("document_info", [])
     
+    # Check if we've already performed a deep research and have results
+    last_agent_outcome = state.get("last_agent_outcome", {})
+    if (last_agent_outcome.get("agent") == "deep_research_agent" and 
+        last_agent_outcome.get("status") == "completed"):
+        return "final_response_agent"
+        
+    # Check if we've already performed web scraping and have results
+    if (last_agent_outcome.get("agent") == "web_scraping_agent" and 
+        last_agent_outcome.get("status") == "completed"):
+        return "final_response_agent"
+        
+    # Check if we've already performed RAG analysis and have results
+    if (last_agent_outcome.get("agent") == "rag_agent" and 
+        last_agent_outcome.get("status") == "completed"):
+        return "final_response_agent"
+        
+    # Check if we've already performed image analysis and have results
+    if (last_agent_outcome.get("agent") == "image_analysis_agent" and 
+        last_agent_outcome.get("status") == "completed"):
+        return "final_response_agent"
+        
+    # Check if we've already performed memory management and have results
+    if (last_agent_outcome.get("agent") == "memory_agent" and 
+        last_agent_outcome.get("status") == "completed"):
+        return "final_response_agent"
+    
     # Only use essential, high-confidence rules for fallback
     if document_info and any(keyword in query_lower for keyword in ["document", "pdf", "file"]):
         return "rag_agent"
@@ -297,8 +388,9 @@ def _minimal_fallback_routing(state: UnifiedState, query: str) -> str:
         return "image_analysis_agent"
     elif any(keyword in query_lower for keyword in ["search", "find", "what is", "who is"]):
         return "web_search_agent"
+    elif any(keyword in query_lower for keyword in ["research", "analyze", "study", "compare"]):
+        return "deep_research_agent"
     else:
-        # Default to final response for simple queries or when uncertain
         return "final_response_agent"
 
 # Removed _determine_next_agent_after_completion - LLM should handle this logic
@@ -574,6 +666,32 @@ def _fallback_routing(state: UnifiedState) -> str:
     all_messages = state.get("messages", [])
     messages = all_messages[-6:] if len(all_messages) > 6 else all_messages  # Last 6 messages
     document_info = state.get("document_info", [])
+    
+    # Check if we've already performed a deep research and have results
+    last_agent_outcome = state.get("last_agent_outcome", {})
+    if (last_agent_outcome.get("agent") == "deep_research_agent" and 
+        last_agent_outcome.get("status") == "completed"):
+        return "final_response_agent"
+        
+    # Check if we've already performed web scraping and have results
+    if (last_agent_outcome.get("agent") == "web_scraping_agent" and 
+        last_agent_outcome.get("status") == "completed"):
+        return "final_response_agent"
+        
+    # Check if we've already performed RAG analysis and have results
+    if (last_agent_outcome.get("agent") == "rag_agent" and 
+        last_agent_outcome.get("status") == "completed"):
+        return "final_response_agent"
+        
+    # Check if we've already performed image analysis and have results
+    if (last_agent_outcome.get("agent") == "image_analysis_agent" and 
+        last_agent_outcome.get("status") == "completed"):
+        return "final_response_agent"
+        
+    # Check if we've already performed memory management and have results
+    if (last_agent_outcome.get("agent") == "memory_agent" and 
+        last_agent_outcome.get("status") == "completed"):
+        return "final_response_agent"
     
     if not messages:
         return "final_response_agent"

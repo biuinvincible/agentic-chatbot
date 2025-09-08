@@ -21,8 +21,9 @@ from langchain_core.messages import (
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import StructuredTool
 from langgraph.graph import END, START, StateGraph
-from langgraph.types import Command
+from langgraph.types import Command, interrupt
 from langgraph.checkpoint.memory import MemorySaver
+from langgraph.errors import GraphInterrupt
 
 from agents.deep_research_agent.configuration import (
     Configuration,
@@ -138,8 +139,10 @@ async def clarify_with_user(state: AgentState, config: RunnableConfig) -> Comman
     Returns:
         Command to either end with a clarifying question or proceed to research brief
     """
+    print(f"[DeepResearch] Config received: {config}")
     # Step 1: Check if clarification is enabled in configuration
     configurable = Configuration.from_runnable_config(config)
+    print(f"[DeepResearch] Configurable: {configurable}")
     if not configurable.allow_clarification:
         # Skip clarification step and proceed directly to research
         return Command(goto="write_research_brief")
@@ -180,13 +183,52 @@ async def clarify_with_user(state: AgentState, config: RunnableConfig) -> Comman
         raise ResearchError(f"Failed to analyze user query: {str(e)}") from e
     
     # Step 4: Route based on clarification analysis
+    print(f"[DeepResearch] Clarification analysis result: need_clarification={response.need_clarification}")
     if response.need_clarification:
-        # End with clarifying question for user
-        return Command(
-            goto=END, 
-            update={"messages": [AIMessage(content=response.question)]}
-        )
+        # Check if we should use interactive clarification (new feature)
+        # For now, we'll add a flag to enable this in the configuration
+        # This maintains backward compatibility while enabling the new feature
+        use_interactive_clarification = getattr(configurable, 'use_interactive_clarification', False)
+        print(f"[DeepResearch] Clarification needed. Interactive clarification enabled: {use_interactive_clarification}")
+        
+        if use_interactive_clarification:
+            try:
+                print(f"[DeepResearch] Asking user for clarification: {response.question}")
+                print(f"[DeepResearch] Would interrupt with: {response.question}")
+                
+                # This will pause execution and wait for user input
+                user_clarification = interrupt({
+                    "type": "clarification_request",
+                    "question": response.question,
+                    "session_id": config.get("configurable", {}).get("thread_id", "unknown")
+                })
+                
+                # When resumed, continue with the user's clarification
+                print(f"[DeepResearch] Received user clarification: {user_clarification}")
+                return Command(
+                    goto="write_research_brief", 
+                    update={"messages": [AIMessage(content=str(user_clarification))]}
+                )
+            except GraphInterrupt:
+                # Re-raise GraphInterrupt to let it propagate to the backend
+                print(f"[DeepResearch] Propagating GraphInterrupt")
+                raise
+            except Exception as interrupt_error:
+                # If interrupt fails or is not available, fall back to the original behavior
+                print(f"[DeepResearch] Interactive clarification failed, falling back: {interrupt_error}")
+                return Command(
+                    goto=END, 
+                    update={"messages": [AIMessage(content=response.question)]}
+                )
+        else:
+            print(f"[DeepResearch] Not using interactive clarification, returning question: {response.question}")
+            # Original behavior - end with clarifying question for user
+            return Command(
+                goto=END, 
+                update={"messages": [AIMessage(content=response.question)]}
+            )
     else:
+        print(f"[DeepResearch] No clarification needed, proceeding with verification: {response.verification}")
         # Proceed to research with verification message
         return Command(
             goto="write_research_brief", 
