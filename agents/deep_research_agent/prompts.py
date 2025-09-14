@@ -1,45 +1,27 @@
 """System prompts and prompt templates for the Local Deep Research agent."""
 
-clarify_with_user_instructions="""
-These are the messages that have been exchanged so far from the user asking for the report:
+# Modified clarification prompt for more natural LLM handling
+clarify_with_user_instructions = """You are a research assistant that needs to understand exactly what kind of research the user wants to conduct.
+
+Here are the messages exchanged so far:
 <Messages>
 {messages}
 </Messages>
 
 Today's date is {date}.
 
-Assess whether you need to ask a clarifying question, or if the user has already provided enough information for you to start research.
-IMPORTANT: If you can see in the messages history that you have already asked a clarifying question, you almost always do not need to ask another one. Only ask another question if ABSOLUTELY NECESSARY.
+Your task is to engage in a natural conversation with the user to clarify their research needs. Rather than asking structured questions, have a genuine dialogue to understand:
 
-If there are acronyms, abbreviations, or unknown terms, ask the user to clarify.
-If you need to ask a question, follow these guidelines:
-- Be concise while gathering all necessary information
-- Make sure to gather all the information needed to carry out the research task in a concise, well-structured manner.
-- Use bullet points or numbered lists if appropriate for clarity. Make sure that this uses markdown formatting and will be rendered correctly if the string output is passed to a markdown renderer.
-- Don't ask for unnecessary information, or information that the user has already provided. If you can see that the user has already provided the information, do not ask for it again.
+1. What specific topic or question do they want researched?
+2. What kind of information are they looking for?
+3. Are there any specific angles, perspectives, or aspects they're particularly interested in?
+4. What will they use this research for?
 
-Respond in valid JSON format with these exact keys:
-"need_clarification": boolean,
-"question": "<question to ask the user to clarify the report scope>",
-"verification": "<verification message that we will start research>"
+Respond to the user in a friendly, conversational manner. Ask follow-up questions, acknowledge their responses, and dig deeper when needed. The goal is to gather enough information to conduct thorough research.
 
-If you need to ask a clarifying question, return:
-"need_clarification": true,
-"question": "<your clarifying question>",
-"verification": ""
+When you feel you have enough information to proceed with the research, simply say "I'm ready to begin the research on [topic]" and we'll move to the next phase."""
 
-If you do not need to ask a clarifying question, return:
-"need_clarification": false,
-"question": "",
-"verification": "<acknowledgement message that you will now start research based on the provided information>"
-
-For the verification message when no clarification is needed:
-- Acknowledge that you have sufficient information to proceed
-- Briefly summarize the key aspects of what you understand from their request
-- Confirm that you will now begin the research process
-- Keep the message concise and professional
-"""
-
+clarify_with_user_simple_prompt = """The user has requested deep research. Please engage in a natural conversation to understand exactly what they want researched and why. Ask clarifying questions as needed, but do so conversationally rather than in a structured format."""
 
 transform_messages_into_research_topic_prompt = """You will be given a set of messages that have been exchanged so far between yourself and the user. 
 Your job is to translate these messages into a more detailed and concrete research question that will be used to guide the research.

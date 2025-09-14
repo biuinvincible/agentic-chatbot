@@ -177,6 +177,16 @@ function App() {
 
     let currentDocumentInfo = [...documentInfo];
     let uploadedDocumentInfo = null;
+    let isInterruptResponse = false;
+    
+    // Check if the last message was an interrupt (clarification request)
+    if (messages.length > 0) {
+      const lastMessage = messages[messages.length - 1];
+      // Check if the last message was from the assistant and had interrupt data
+      if (lastMessage.role === 'assistant' && lastMessage.isInterrupt) {
+        isInterruptResponse = true;
+      }
+    }
     
     // Upload file if selected
     if (selectedFile) {
@@ -200,33 +210,84 @@ function App() {
     setIsProcessing(true);
 
     try {
-      // Prepare request data with forced agent if set
-      const requestData = {
-        message: inputMessage,
-        session_id: sessionId,
-        document_info: currentDocumentInfo
-      };
-      
-      // Add forced agent if set
-      if (forcedAgent) {
-        requestData.user_forced_agent = forcedAgent;
-        console.log('Sending forced agent:', forcedAgent);
-        console.log('Sending document info:', currentDocumentInfo);
-      }
+      if (isInterruptResponse) {
+        // Send interrupt response to resume endpoint
+        console.log('Sending interrupt response to resume endpoint');
+        const requestData = {
+          message: inputMessage,
+          session_id: sessionId,
+          document_info: currentDocumentInfo
+        };
+        
+        const response = await axios.post(`${API_BASE}/chat/resume`, requestData);
 
-      const response = await axios.post(`${API_BASE}/chat`, requestData);
+        // Check if response contains another interrupt
+        if (response.data.interrupt && response.data.interrupt.type === "clarification_request") {
+          // Handle interrupt - add the clarification question to chat with interrupt flag
+          const interruptMessage = { 
+            role: 'assistant', 
+            content: response.data.interrupt.question,
+            isInterrupt: true  // Flag to indicate this is an interrupt message
+          };
+          setMessages(prev => [...prev, interruptMessage]);
+          // Keep the forced agent active for when user responds
+          // Don't reset forced agent yet
+        } else {
+          // Normal response - add assistant message to chat
+          const assistantMessage = { role: 'assistant', content: response.data.response };
+          setMessages(prev => [...prev, assistantMessage]);
+          
+          // Update document info if provided
+          if (response.data.document_info && Array.isArray(response.data.document_info)) {
+            setDocumentInfo(response.data.document_info);
+          }
+          
+          // Reset forced agent after completing interrupt
+          setForcedAgent(null);
+        }
+      } else {
+        // Send normal message to chat endpoint
+        // Prepare request data with forced agent if set
+        const requestData = {
+          message: inputMessage,
+          session_id: sessionId,
+          document_info: currentDocumentInfo
+        };
+        
+        // Add forced agent if set
+        if (forcedAgent) {
+          requestData.user_forced_agent = forcedAgent;
+          console.log('Sending forced agent:', forcedAgent);
+          console.log('Sending document info:', currentDocumentInfo);
+        }
 
-      // Add assistant message to chat
-      const assistantMessage = { role: 'assistant', content: response.data.response };
-      setMessages(prev => [...prev, assistantMessage]);
-      
-      // Update document info if provided
-      if (response.data.document_info && Array.isArray(response.data.document_info)) {
-        setDocumentInfo(response.data.document_info);
+        const response = await axios.post(`${API_BASE}/chat`, requestData);
+
+        // Check if response contains an interrupt
+        if (response.data.interrupt && response.data.interrupt.type === "clarification_request") {
+          // Handle interrupt - add the clarification question to chat with interrupt flag
+          const interruptMessage = { 
+            role: 'assistant', 
+            content: response.data.interrupt.question,
+            isInterrupt: true  // Flag to indicate this is an interrupt message
+          };
+          setMessages(prev => [...prev, interruptMessage]);
+          // Keep the forced agent active for when user responds
+          // Don't reset forced agent yet
+        } else {
+          // Normal response - add assistant message to chat
+          const assistantMessage = { role: 'assistant', content: response.data.response };
+          setMessages(prev => [...prev, assistantMessage]);
+          
+          // Update document info if provided
+          if (response.data.document_info && Array.isArray(response.data.document_info)) {
+            setDocumentInfo(response.data.document_info);
+          }
+          
+          // Reset forced agent after use for normal responses
+          setForcedAgent(null);
+        }
       }
-      
-      // Reset forced agent after use
-      setForcedAgent(null);
     } catch (error) {
       const errorMessage = { 
         role: 'assistant', 

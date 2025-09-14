@@ -27,19 +27,6 @@ class Summary(BaseModel):
     summary: str
     key_excerpts: str
 
-class ClarifyWithUser(BaseModel):
-    """Model for user clarification requests."""
-    
-    need_clarification: bool = Field(
-        description="Whether the user needs to be asked a clarifying question.",
-    )
-    question: str = Field(
-        description="A question to ask the user to clarify the report scope",
-    )
-    verification: str = Field(
-        description="Verify message that we will start research after the user has provided the necessary information.",
-    )
-
 class ResearchQuestion(BaseModel):
     """Research question and brief for guiding research."""
     
@@ -81,7 +68,7 @@ def override_reducer(current_value, new_value):
         return new_value.get("value", new_value)
     else:
         return operator.add(current_value, new_value)
-    
+        
 class AgentInputState(MessagesState):
     """InputState is only 'messages'."""
 

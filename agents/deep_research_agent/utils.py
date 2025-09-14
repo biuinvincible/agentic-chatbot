@@ -34,8 +34,8 @@ try:
     from crawl4ai import AsyncWebCrawler
     CRAWL4AI_AVAILABLE = True
 except ImportError:
-    CRAWL4AI_AVAILABLE = False
-    print("Crawl4AI not available, web scraping will be limited")
+    crawl4ai_available = False
+    # print("Crawl4AI not available, web scraping will be limited")
 
 from agents.deep_research_agent.configuration import Configuration, SearchAPI
 from agents.deep_research_agent.prompts import summarize_webpage_prompt

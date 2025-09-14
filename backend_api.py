@@ -30,6 +30,7 @@ from langchain_core.messages import HumanMessage, BaseMessage, AIMessage
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.store.memory import InMemoryStore
 from langgraph.errors import GraphInterrupt
+from langgraph.types import Command
 # Use the supervisor with deep search for enhanced capabilities
 from agents.supervisor import create_agent_graph
 from agents.file_processing.workflow import DocumentProcessor
@@ -65,6 +66,7 @@ class ChatResponse(BaseModel):
     session_id: str
     document_info: List[Dict[str, Any]]
     messages: List[ChatMessage]
+    interrupt: Optional[Dict[str, Any]] = None
 
 class DocumentInfo(BaseModel):
     doc_id: str
@@ -326,7 +328,7 @@ async def send_progress_update(session_id: str, update: ProgressUpdate):
     if session_id in active_connections:
         try:
             websocket = active_connections[session_id]
-            await websocket.send_text(json.dumps(update.dict()))
+            await websocket.send_text(json.dumps(update.model_dump()))
         except Exception as e:
             print(f"Error sending progress update: {e}")
 
@@ -420,6 +422,86 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks):
         logger.info(f"Document count: {len(request.document_info)}")
         logger.info(f"User forced agent: {request.user_forced_agent}")
         
+        # Check if there's an existing interrupt state for this session
+        config = {"configurable": {"thread_id": request.session_id, "recursion_limit": 100}}
+        
+        # Get the current conversation history to check for interrupt patterns
+        conversation_messages = []
+        try:
+            async with aiosqlite.connect("checkpoints.db") as conn:
+                cursor = await conn.execute(
+                    "SELECT role, content FROM messages WHERE conversation_id = ? ORDER BY created_at ASC",
+                    (request.session_id,)
+                )
+                rows = await cursor.fetchall()
+                conversation_messages = [{"role": row[0], "content": row[1]} for row in rows]
+        except Exception as e:
+            print(f"[Backend] Could not retrieve conversation history: {e}")
+        
+        # Debug: Print conversation history
+        print(f"[Backend] Conversation history for session {request.session_id}:")
+        for i, msg in enumerate(conversation_messages):
+            print(f"  [{i}] {msg['role']}: {msg['content'][:100]}...")
+        
+        # Check if the previous result had an interrupt that wasn't properly handled
+        # This is a workaround for cases where the interrupt state might not be properly detected
+        try:
+            # First, check the current state for interrupts (using async interface)
+            current_state = await graph.aget_state(config)
+            print(f"[Backend] Current state type: {type(current_state)}")
+            print(f"[Backend] Current state attributes: {dir(current_state) if current_state else 'None'}")
+            
+            has_interrupts = False
+            
+            # Check various possible locations for interrupts
+            if current_state:
+                # Check for __interrupts__ (newer LangGraph)
+                if hasattr(current_state, '__interrupts__') and current_state.__interrupts__:
+                    has_interrupts = True
+                    print(f"[Backend] Found existing interrupt state (__interrupts__), automatically resuming with user input: {request.message}")
+                # Check for tasks with interrupts (older LangGraph)
+                elif hasattr(current_state, 'tasks') and current_state.tasks:
+                    for task in current_state.tasks:
+                        if hasattr(task, 'interrupts') and task.interrupts:
+                            has_interrupts = True
+                            print(f"[Backend] Found existing interrupt state (tasks.interrupts), automatically resuming with user input: {request.message}")
+                            break
+                # Check for interrupt attribute directly
+                elif hasattr(current_state, 'interrupt') and current_state.interrupt:
+                    has_interrupts = True
+                    print(f"[Backend] Found existing interrupt state (interrupt), automatically resuming with user input: {request.message}")
+                # Check for interrupts in values (LangGraph 0.6.5+)
+                elif hasattr(current_state, 'values') and isinstance(current_state.values, dict):
+                    if '__interrupt__' in current_state.values and current_state.values['__interrupt__']:
+                        has_interrupts = True
+                        print(f"[Backend] Found existing interrupt state (values.__interrupt__), automatically resuming with user input: {request.message}")
+            
+            # If we still don't detect interrupts but the user is responding to what appears to be an interrupt,
+            # we can check if the last message was from the assistant asking for clarification
+            if not has_interrupts and conversation_messages:
+                last_message = conversation_messages[-1] if len(conversation_messages) > 0 else None
+                if last_message and last_message.get('role') == 'assistant':
+                    # Check if the last message content looks like a clarification request
+                    last_content = last_message.get('content', '')
+                    print(f"[Backend] Last assistant message content: {last_content[:200]}...")
+                    if any(keyword in last_content.lower() for keyword in ['clarification', 'interested in', 'help me focus', 'what aspects', 'are you interested']):
+                        print(f"[Backend] Detected possible interrupt response based on last message content, attempting to resume: {request.message}")
+                        has_interrupts = True
+            
+            if has_interrupts:
+                # There's an existing interrupt, resume with user's response
+                resume_command = Command(resume=request.message)
+                result = await graph.ainvoke(resume_command, config)
+                # Handle the result the same way as resume_chat
+                return await _handle_resume_result(result, request, config)
+            else:
+                print(f"[Backend] No interrupt detected, proceeding with normal processing")
+        except Exception as state_check_error:
+            print(f"[Backend] Could not check state for interrupts: {state_check_error}")
+            import traceback
+            traceback.print_exc()
+            # Continue with normal processing if state check fails
+        
         # Create input message
         input_message = HumanMessage(content=request.message)
         
@@ -435,12 +517,226 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks):
             "user_forced_agent": request.user_forced_agent if request.user_forced_agent and request.user_forced_agent != "Auto" else None
         }
             
-        config = {"configurable": {"thread_id": request.session_id}}
         # Pass the config through to agents
         input_dict["config"] = config
         logger.info(f"Invoking agent graph with session: {request.session_id}")
         
-        result = await target_graph.ainvoke(input_dict, config)
+        # Directly catch GraphInterrupt to handle human-in-the-loop scenarios
+        try:
+            print(f"[Backend] About to invoke target_graph.ainvoke")
+            result = await target_graph.ainvoke(input_dict, config)
+            print(f"[Backend] target_graph.ainvoke completed, result type: {type(result)}")
+            
+            # Check if result contains interrupt field (LangGraph 0.6.5 behavior)
+            if isinstance(result, dict):
+                print(f"[Backend] Result keys: {result.keys()}")
+                if "__interrupt__" in result:
+                    print(f"[Backend] Found interrupt in result: {result['__interrupt__']}")
+                    interrupt_data = result["__interrupt__"]
+                    
+                    # Extract interrupt value from the interrupt data
+                    interrupt_value = None
+                    if isinstance(interrupt_data, list) and len(interrupt_data) > 0:
+                        first_interrupt = interrupt_data[0]
+                        if hasattr(first_interrupt, 'value'):
+                            interrupt_value = first_interrupt.value
+                        else:
+                            interrupt_value = first_interrupt
+                    else:
+                        interrupt_value = interrupt_data
+                        
+                    print(f"[Backend] Extracted interrupt value: {interrupt_value}")
+                    
+                    # Handle dictionary-based interrupt values
+                    if isinstance(interrupt_value, dict):
+                        if interrupt_value.get("type") == "clarification_request":
+                            clarification_question = interrupt_value.get("question", "Please provide clarification:")
+                            logger.info(f"Returning clarification question: {clarification_question}")
+                            print(f"[Backend] Returning clarification question: {clarification_question}")
+                            
+                            # Return the clarification question to the user with interrupt indicator
+                            response = ChatResponse(
+                                response=clarification_question,
+                                session_id=request.session_id,
+                                document_info=request.document_info,
+                                messages=[
+                                    ChatMessage(role="user", content=request.message),
+                                    ChatMessage(role="assistant", content=clarification_question)
+                                ],
+                                interrupt={
+                                    "type": "clarification_request",
+                                    "question": clarification_question
+                                }
+                            )
+                            print(f"[Backend] Constructed interrupt response: {response.model_dump_json(indent=2)}")
+                            return response
+        except GraphInterrupt as interrupt:
+            # Handle interrupt - extract the interrupt value
+            logger.info(f"GraphInterrupt caught: {interrupt}")
+            print(f"[Backend] GraphInterrupt caught in chat endpoint: {interrupt}")
+            
+            # Extract interrupt value - handle different possible structures
+            interrupt_value = None
+            
+            # Check if interrupt has a value attribute
+            if hasattr(interrupt, 'value'):
+                interrupt_value = interrupt.value
+            # Check if interrupt has interrupts attribute (list of interrupts)
+            elif hasattr(interrupt, 'interrupts') and interrupt.interrupts:
+                # Get the first interrupt's value
+                first_interrupt = interrupt.interrupts[0]
+                if hasattr(first_interrupt, 'value'):
+                    interrupt_value = first_interrupt.value
+                else:
+                    interrupt_value = first_interrupt
+            else:
+                interrupt_value = interrupt
+                
+            logger.info(f"Interrupt value: {interrupt_value}")
+            print(f"[Backend] Interrupt value: {interrupt_value}")
+            
+            # Handle dictionary-based interrupt values
+            if isinstance(interrupt_value, dict):
+                if interrupt_value.get("type") == "clarification_request":
+                    clarification_question = interrupt_value.get("question", "Please provide clarification:")
+                    logger.info(f"Returning clarification question: {clarification_question}")
+                    print(f"[Backend] Returning clarification question: {clarification_question}")
+                    
+                    # Return the clarification question to the user with interrupt indicator
+                    response = ChatResponse(
+                        response=clarification_question,
+                        session_id=request.session_id,
+                        document_info=request.document_info,
+                        messages=[
+                            ChatMessage(role="user", content=request.message),
+                            ChatMessage(role="assistant", content=clarification_question)
+                        ],
+                        interrupt={
+                            "type": "clarification_request",
+                            "question": clarification_question
+                        }
+                    )
+                    print(f"[Backend] Constructed interrupt response: {response.model_dump_json(indent=2)}")
+                    return response
+            # If we get a list of interrupts, check the first one
+            elif isinstance(interrupt_value, list) and len(interrupt_value) > 0:
+                first_interrupt = interrupt_value[0]
+                if isinstance(first_interrupt, dict) and first_interrupt.get("type") == "clarification_request":
+                    clarification_question = first_interrupt.get("question", "Please provide clarification:")
+                    logger.info(f"Returning clarification question: {clarification_question}")
+                    print(f"[Backend] Returning clarification question: {clarification_question}")
+                    
+                    # Return the clarification question to the user with interrupt indicator
+                    response = ChatResponse(
+                        response=clarification_question,
+                        session_id=request.session_id,
+                        document_info=request.document_info,
+                        messages=[
+                            ChatMessage(role="user", content=request.message),
+                            ChatMessage(role="assistant", content=clarification_question)
+                        ],
+                        interrupt={
+                            "type": "clarification_request",
+                            "question": clarification_question
+                        }
+                    )
+                    print(f"[Backend] Constructed interrupt response: {response.model_dump_json(indent=2)}")
+                    return response
+                # Handle case where first_interrupt is an Interrupt object with a value attribute
+                elif hasattr(first_interrupt, 'value'):
+                    clarification_question = first_interrupt.value
+                    logger.info(f"Returning clarification question: {clarification_question}")
+                    print(f"[Backend] Returning clarification question: {clarification_question}")
+                    
+                    # Return the clarification question to the user with interrupt indicator
+                    response = ChatResponse(
+                        response=clarification_question,
+                        session_id=request.session_id,
+                        document_info=request.document_info,
+                        messages=[
+                            ChatMessage(role="user", content=request.message),
+                            ChatMessage(role="assistant", content=clarification_question)
+                        ],
+                        interrupt={
+                            "type": "clarification_request",
+                            "question": clarification_question
+                        }
+                    )
+                    print(f"[Backend] Constructed interrupt response: {response.model_dump_json(indent=2)}")
+                    return response
+            # Handle case where interrupt_value is the actual dict we want (LangGraph 0.6.5)
+            elif hasattr(interrupt_value, '__dict__'):
+                # Try to get the interrupt data directly from the interrupt object
+                interrupt_dict = interrupt_value.__dict__
+                if interrupt_dict.get("type") == "clarification_request":
+                    clarification_question = interrupt_dict.get("question", "Please provide clarification:")
+                    logger.info(f"Returning clarification question: {clarification_question}")
+                    print(f"[Backend] Returning clarification question: {clarification_question}")
+                    
+                    # Return the clarification question to the user with interrupt indicator
+                    response = ChatResponse(
+                        response=clarification_question,
+                        session_id=request.session_id,
+                        document_info=request.document_info,
+                        messages=[
+                            ChatMessage(role="user", content=request.message),
+                            ChatMessage(role="assistant", content=clarification_question)
+                        ],
+                        interrupt={
+                            "type": "clarification_request",
+                            "question": clarification_question
+                        }
+                    )
+                    print(f"[Backend] Constructed interrupt response: {response.model_dump_json(indent=2)}")
+                    return response
+            # Handle case where interrupt_value is an Interrupt object with a value attribute
+            elif hasattr(interrupt_value, 'value'):
+                clarification_question = interrupt_value.value
+                logger.info(f"Returning clarification question: {clarification_question}")
+                print(f"[Backend] Returning clarification question: {clarification_question}")
+                
+                # Return the clarification question to the user with interrupt indicator
+                response = ChatResponse(
+                    response=clarification_question,
+                    session_id=request.session_id,
+                    document_info=request.document_info,
+                    messages=[
+                        ChatMessage(role="user", content=request.message),
+                        ChatMessage(role="assistant", content=clarification_question)
+                    ],
+                    interrupt={
+                        "type": "clarification_request",
+                        "question": clarification_question
+                    }
+                )
+                print(f"[Backend] Constructed interrupt response: {response.model_dump_json(indent=2)}")
+                return response
+            # Handle case where interrupt_value is a string (direct clarification question)
+            elif isinstance(interrupt_value, str):
+                clarification_question = interrupt_value
+                logger.info(f"Returning clarification question: {clarification_question}")
+                print(f"[Backend] Returning clarification question: {clarification_question}")
+                
+                # Return the clarification question to the user with interrupt indicator
+                response = ChatResponse(
+                    response=clarification_question,
+                    session_id=request.session_id,
+                    document_info=request.document_info,
+                    messages=[
+                        ChatMessage(role="user", content=request.message),
+                        ChatMessage(role="assistant", content=clarification_question)
+                    ],
+                    interrupt={
+                        "type": "clarification_request",
+                        "question": clarification_question
+                    }
+                )
+                print(f"[Backend] Constructed interrupt response: {response.model_dump_json(indent=2)}")
+                return response
+            # If we get here, it's not a clarification request, so re-raise the interrupt
+            print(f"[Backend] Re-raising interrupt as it's not a clarification request")
+            raise
+        
         # Log important parts of result instead of entire result object
         messages_count = len(result.get("messages", [])) if isinstance(result, dict) else "Unknown"
         logger.info(f"Agent graph completed - Messages in result: {messages_count}")
@@ -524,35 +820,10 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks):
         
         return response
         
-    except GraphInterrupt as e:
-        # Handle interrupt for clarification
-        print(f"[Backend] Caught GraphInterrupt: {e}")
-        interrupts = getattr(e, 'interrupts', [])
-        print(f"[Backend] Interrupts: {interrupts}")
-        if interrupts:
-            # Extract the interrupt value
-            interrupt_value = interrupts[0].value if hasattr(interrupts[0], 'value') else {}
-            print(f"[Backend] Interrupt value: {interrupt_value}")
-            if isinstance(interrupt_value, dict) and interrupt_value.get("type") == "clarification_request":
-                clarification_question = interrupt_value.get("question", "Please provide clarification:")
-                print(f"[Backend] Returning clarification question: {clarification_question}")
-                
-                # Return the clarification question to the user
-                return ChatResponse(
-                    response=clarification_question,
-                    session_id=request.session_id,
-                    document_info=request.document_info,
-                    messages=[
-                        ChatMessage(role="user", content=request.message),
-                        ChatMessage(role="assistant", content=clarification_question)
-                    ]
-                )
-        # Re-raise if not a clarification interrupt
-        print(f"[Backend] Re-raising interrupt")
-        raise e
-        
     except Exception as e:
         print(f"BACKEND API ERROR: {str(e)}")
+        print(f"Exception type: {type(e)}")
+        print(f"Exception attributes: {dir(e)}")
         raise HTTPException(status_code=500, detail=f"Error processing request: {str(e)}")
 
 
@@ -567,15 +838,260 @@ async def resume_chat(request: ChatRequest):
     try:
         # Get the user's response from the message
         user_response = request.message
+        print(f"[Backend] resume_chat called with user response: {user_response}")
+        print(f"[Backend] Session ID: {request.session_id}")
         
         # Resume the interrupted workflow with user input
-        config = {"configurable": {"thread_id": request.session_id}}
+        config = {"configurable": {"thread_id": request.session_id, "recursion_limit": 100}}
         
         # Use Command to resume with the user's response
         from langgraph.types import Command
         resume_command = Command(resume=user_response)
+        print(f"[Backend] Created resume command: {resume_command}")
         
-        result = await graph.ainvoke(resume_command, config)
+        # Directly catch GraphInterrupt to handle human-in-the-loop scenarios
+        try:
+            result = await graph.ainvoke(resume_command, config)
+            print(f"[Backend] Resume result type: {type(result)}")
+            print(f"[Backend] Resume result keys: {result.keys() if isinstance(result, dict) else 'Not a dict'}")
+            
+            # Check if result contains interrupt field (LangGraph 0.6.5 behavior)
+            if isinstance(result, dict) and "__interrupt__" in result:
+                print(f"[Backend] Found interrupt in resume result: {result['__interrupt__']}")
+                interrupt_data = result["__interrupt__"]
+                
+                # Extract interrupt value from the interrupt data
+                interrupt_value = None
+                if isinstance(interrupt_data, list) and len(interrupt_data) > 0:
+                    first_interrupt = interrupt_data[0]
+                    if hasattr(first_interrupt, 'value'):
+                        interrupt_value = first_interrupt.value
+                    else:
+                        interrupt_value = first_interrupt
+                else:
+                    interrupt_value = interrupt_data
+                    
+                print(f"[Backend] Extracted interrupt value from resume: {interrupt_value}")
+                
+                # Handle dictionary-based interrupt values
+                if isinstance(interrupt_value, dict):
+                    if interrupt_value.get("type") == "clarification_request":
+                        clarification_question = interrupt_value.get("question", "Please provide clarification:")
+                        print(f"[Backend] === RETURNING NEW CLARIFICATION QUESTION ===")
+                        print(f"[Backend] Question: {clarification_question}")
+                        
+                        # Return the clarification question to the user with interrupt indicator
+                        response = ChatResponse(
+                            response=clarification_question,
+                            session_id=request.session_id,
+                            document_info=request.document_info,
+                            messages=[
+                                ChatMessage(role="user", content=user_response),
+                                ChatMessage(role="assistant", content=clarification_question)
+                            ],
+                            interrupt={
+                                "type": "clarification_request",
+                                "question": clarification_question
+                            }
+                        )
+                        print(f"[Backend] Response with interrupt: {response.model_dump_json(indent=2)}")
+                        return response
+        except GraphInterrupt as interrupt:
+            # Handle interrupt - extract the interrupt value
+            print(f"[Backend] GraphInterrupt caught in resume_chat: {interrupt}")
+            
+            # Extract interrupt value - handle different possible structures
+            interrupt_value = None
+            
+            # Check if interrupt has a value attribute
+            if hasattr(interrupt, 'value'):
+                interrupt_value = interrupt.value
+            # Check if interrupt has interrupts attribute (list of interrupts)
+            elif hasattr(interrupt, 'interrupts') and interrupt.interrupts:
+                # Get the first interrupt's value
+                first_interrupt = interrupt.interrupts[0]
+                if hasattr(first_interrupt, 'value'):
+                    interrupt_value = first_interrupt.value
+                else:
+                    interrupt_value = first_interrupt
+            else:
+                interrupt_value = interrupt
+                
+            print(f"[Backend] Interrupt value in resume_chat: {interrupt_value}")
+            
+            # Handle dictionary-based interrupt values
+            if isinstance(interrupt_value, dict):
+                if interrupt_value.get("type") == "clarification_request":
+                    clarification_question = interrupt_value.get("question", "Please provide clarification:")
+                    print(f"[Backend] === RETURNING NEW CLARIFICATION QUESTION ===")
+                    print(f"[Backend] Question: {clarification_question}")
+                    
+                    # Return the clarification question to the user with interrupt indicator
+                    response = ChatResponse(
+                        response=clarification_question,
+                        session_id=request.session_id,
+                        document_info=request.document_info,
+                        messages=[
+                            ChatMessage(role="user", content=user_response),
+                            ChatMessage(role="assistant", content=clarification_question)
+                        ],
+                        interrupt={
+                            "type": "clarification_request",
+                            "question": clarification_question
+                        }
+                    )
+                    print(f"[Backend] Response with interrupt: {response.model_dump_json(indent=2)}")
+                    return response
+            # If we get a list of interrupts, check the first one
+            elif isinstance(interrupt_value, list) and len(interrupt_value) > 0:
+                first_interrupt = interrupt_value[0]
+                if isinstance(first_interrupt, dict) and first_interrupt.get("type") == "clarification_request":
+                    clarification_question = first_interrupt.get("question", "Please provide clarification:")
+                    print(f"[Backend] === RETURNING NEW CLARIFICATION QUESTION ===")
+                    print(f"[Backend] Question: {clarification_question}")
+                    
+                    # Return the clarification question to the user with interrupt indicator
+                    response = ChatResponse(
+                        response=clarification_question,
+                        session_id=request.session_id,
+                        document_info=request.document_info,
+                        messages=[
+                            ChatMessage(role="user", content=user_response),
+                            ChatMessage(role="assistant", content=clarification_question)
+                        ],
+                        interrupt={
+                            "type": "clarification_request",
+                            "question": clarification_question
+                        }
+                    )
+                    print(f"[Backend] Response with interrupt: {response.model_dump_json(indent=2)}")
+                    return response
+                # Handle case where first_interrupt is an Interrupt object with a value attribute
+                elif hasattr(first_interrupt, 'value'):
+                    clarification_question = first_interrupt.value
+                    print(f"[Backend] === RETURNING NEW CLARIFICATION QUESTION ===")
+                    print(f"[Backend] Question: {clarification_question}")
+                    
+                    # Return the clarification question to the user with interrupt indicator
+                    response = ChatResponse(
+                        response=clarification_question,
+                        session_id=request.session_id,
+                        document_info=request.document_info,
+                        messages=[
+                            ChatMessage(role="user", content=user_response),
+                            ChatMessage(role="assistant", content=clarification_question)
+                        ],
+                        interrupt={
+                            "type": "clarification_request",
+                            "question": clarification_question
+                        }
+                    )
+                    print(f"[Backend] Response with interrupt: {response.model_dump_json(indent=2)}")
+                    return response
+            # Handle case where interrupt_value is the actual dict we want (LangGraph 0.6.5)
+            elif hasattr(interrupt_value, '__dict__'):
+                # Try to get the interrupt data directly from the interrupt object
+                interrupt_dict = interrupt_value.__dict__
+                if interrupt_dict.get("type") == "clarification_request":
+                    clarification_question = interrupt_dict.get("question", "Please provide clarification:")
+                    print(f"[Backend] === RETURNING NEW CLARIFICATION QUESTION ===")
+                    print(f"[Backend] Question: {clarification_question}")
+                    
+                    # Return the clarification question to the user with interrupt indicator
+                    response = ChatResponse(
+                        response=clarification_question,
+                        session_id=request.session_id,
+                        document_info=request.document_info,
+                        messages=[
+                            ChatMessage(role="user", content=user_response),
+                            ChatMessage(role="assistant", content=clarification_question)
+                        ],
+                        interrupt={
+                            "type": "clarification_request",
+                            "question": clarification_question
+                        }
+                    )
+                    print(f"[Backend] Response with interrupt: {response.model_dump_json(indent=2)}")
+                    return response
+            # Handle case where interrupt_value is an Interrupt object with a value attribute
+            elif hasattr(interrupt_value, 'value'):
+                clarification_question = interrupt_value.value
+                print(f"[Backend] === RETURNING NEW CLARIFICATION QUESTION ===")
+                print(f"[Backend] Question: {clarification_question}")
+                
+                # Return the clarification question to the user with interrupt indicator
+                response = ChatResponse(
+                    response=clarification_question,
+                    session_id=request.session_id,
+                    document_info=request.document_info,
+                    messages=[
+                        ChatMessage(role="user", content=user_response),
+                        ChatMessage(role="assistant", content=clarification_question)
+                    ],
+                    interrupt={
+                        "type": "clarification_request",
+                        "question": clarification_question
+                    }
+                )
+                print(f"[Backend] Response with interrupt: {response.model_dump_json(indent=2)}")
+                return response
+            # Handle case where interrupt_value is a string (direct clarification question)
+            elif isinstance(interrupt_value, str):
+                clarification_question = interrupt_value
+                print(f"[Backend] === RETURNING NEW CLARIFICATION QUESTION ===")
+                print(f"[Backend] Question: {clarification_question}")
+                
+                # Return the clarification question to the user with interrupt indicator
+                response = ChatResponse(
+                    response=clarification_question,
+                    session_id=request.session_id,
+                    document_info=request.document_info,
+                    messages=[
+                        ChatMessage(role="user", content=user_response),
+                        ChatMessage(role="assistant", content=clarification_question)
+                    ],
+                    interrupt={
+                        "type": "clarification_request",
+                        "question": clarification_question
+                    }
+                )
+                print(f"[Backend] Response with interrupt: {response.model_dump_json(indent=2)}")
+                return response
+            # If we get here, it's not a clarification request, so re-raise the interrupt
+            raise
+        
+        # Check for new interrupts after resuming
+        try:
+            current_state = await graph.aget_state(config)
+            if current_state and current_state.tasks:
+                for task in current_state.tasks:
+                    if task.interrupts:
+                        for interrupt in task.interrupts:
+                            interrupt_value = getattr(interrupt, 'value', interrupt)
+                            if isinstance(interrupt_value, dict) and interrupt_value.get("type") == "clarification_request":
+                                clarification_question = interrupt_value.get("question", "Please provide clarification:")
+                                print(f"[Backend] === RETURNING NEW CLARIFICATION QUESTION ===")
+                                print(f"[Backend] Question: {clarification_question}")
+                                
+                                # Return the clarification question to the user with interrupt indicator
+                                response = ChatResponse(
+                                    response=clarification_question,
+                                    session_id=request.session_id,
+                                    document_info=request.document_info,
+                                    messages=[
+                                        ChatMessage(role="user", content=user_response),
+                                        ChatMessage(role="assistant", content=clarification_question)
+                                    ],
+                                    interrupt={
+                                        "type": "clarification_request",
+                                        "question": clarification_question
+                                    }
+                                )
+                                print(f"[Backend] Response with interrupt: {response.model_dump_json(indent=2)}")
+                                return response
+        except Exception as state_error:
+            print(f"[Backend] Could not check state for interrupts after resume: {state_error}")
+            # Continue with normal processing if state check fails
         
         # Process result the same way as the regular chat endpoint
         final_message = result["messages"][-1]
@@ -623,7 +1139,9 @@ async def resume_chat(request: ChatRequest):
         return response
         
     except Exception as e:
-        print(f"BACKEND API ERROR: {str(e)}")
+        print(f"BACKEND API ERROR in resume_chat: {str(e)}")
+        print(f"Exception type: {type(e)}")
+        print(f"Exception attributes: {dir(e)}")
         raise HTTPException(status_code=500, detail=f"Error processing request: {str(e)}")
 
 
@@ -883,6 +1401,190 @@ async def create_session():
     # Conversation will be created when user sends first message
     
     return {"session_id": session_id}
+
+
+async def _handle_resume_result(result, request, config):
+    """Helper function to handle resume results consistently"""
+    global graph
+    
+    # Check if result contains interrupt field (LangGraph 0.6.5 behavior)
+    if isinstance(result, dict) and "__interrupt__" in result:
+        print(f"[Backend] Found interrupt in resume result: {result['__interrupt__']}")
+        interrupt_data = result["__interrupt__"]
+        
+        # Extract interrupt value from the interrupt data
+        interrupt_value = None
+        if isinstance(interrupt_data, list) and len(interrupt_data) > 0:
+            first_interrupt = interrupt_data[0]
+            if hasattr(first_interrupt, 'value'):
+                interrupt_value = first_interrupt.value
+            else:
+                interrupt_value = first_interrupt
+        else:
+            interrupt_value = interrupt_data
+            
+        print(f"[Backend] Extracted interrupt value from resume: {interrupt_value}")
+        
+        # Handle dictionary-based interrupt values
+        if isinstance(interrupt_value, dict):
+            if interrupt_value.get("type") == "clarification_request":
+                clarification_question = interrupt_value.get("question", "Please provide clarification:")
+                print(f"[Backend] === RETURNING NEW CLARIFICATION QUESTION ===")
+                print(f"[Backend] Question: {clarification_question}")
+                
+                # Return the clarification question to the user with interrupt indicator
+                response = ChatResponse(
+                    response=clarification_question,
+                    session_id=request.session_id,
+                    document_info=request.document_info,
+                    messages=[
+                        ChatMessage(role="user", content=request.message),
+                        ChatMessage(role="assistant", content=clarification_question)
+                    ],
+                    interrupt={
+                        "type": "clarification_request",
+                        "question": clarification_question
+                    }
+                )
+                print(f"[Backend] Response with interrupt: {response.model_dump_json(indent=2)}")
+                return response
+        # Handle case where first_interrupt is an Interrupt object with a value attribute
+        elif hasattr(interrupt_value, 'value'):
+            clarification_question = interrupt_value.value
+            print(f"[Backend] === RETURNING NEW CLARIFICATION QUESTION ===")
+            print(f"[Backend] Question: {clarification_question}")
+            
+            # Return the clarification question to the user with interrupt indicator
+            response = ChatResponse(
+                response=clarification_question,
+                session_id=request.session_id,
+                document_info=request.document_info,
+                messages=[
+                    ChatMessage(role="user", content=request.message),
+                    ChatMessage(role="assistant", content=clarification_question)
+                ],
+                interrupt={
+                    "type": "clarification_request",
+                    "question": clarification_question
+                }
+            )
+            print(f"[Backend] Response with interrupt: {response.model_dump_json(indent=2)}")
+            return response
+        # Handle case where interrupt_value is a string (direct clarification question)
+        elif isinstance(interrupt_value, str):
+            clarification_question = interrupt_value
+            print(f"[Backend] === RETURNING NEW CLARIFICATION QUESTION ===")
+            print(f"[Backend] Question: {clarification_question}")
+            
+            # Return the clarification question to the user with interrupt indicator
+            response = ChatResponse(
+                response=clarification_question,
+                session_id=request.session_id,
+                document_info=request.document_info,
+                messages=[
+                    ChatMessage(role="user", content=request.message),
+                    ChatMessage(role="assistant", content=clarification_question)
+                ],
+                interrupt={
+                    "type": "clarification_request",
+                    "question": clarification_question
+                }
+            )
+            print(f"[Backend] Response with interrupt: {response.model_dump_json(indent=2)}")
+            return response
+    
+    # Check for new interrupts after resuming
+    try:
+        current_state = await graph.aget_state(config)
+        if current_state and hasattr(current_state, 'tasks') and current_state.tasks:
+            for task in current_state.tasks:
+                if hasattr(task, 'interrupts') and task.interrupts:
+                    for interrupt in task.interrupts:
+                        interrupt_value = getattr(interrupt, 'value', interrupt)
+                        if isinstance(interrupt_value, dict) and interrupt_value.get("type") == "clarification_request":
+                            clarification_question = interrupt_value.get("question", "Please provide clarification:")
+                            print(f"[Backend] === RETURNING NEW CLARIFICATION QUESTION ===")
+                            print(f"[Backend] Question: {clarification_question}")
+                            
+                            # Return the clarification question to the user with interrupt indicator
+                            response = ChatResponse(
+                                response=clarification_question,
+                                session_id=request.session_id,
+                                document_info=request.document_info,
+                                messages=[
+                                    ChatMessage(role="user", content=request.message),
+                                    ChatMessage(role="assistant", content=clarification_question)
+                                ],
+                                interrupt={
+                                    "type": "clarification_request",
+                                    "question": clarification_question
+                                }
+                            )
+                            print(f"[Backend] Response with interrupt: {response.model_dump_json(indent=2)}")
+                            return response
+    except Exception as state_error:
+        print(f"[Backend] Could not check state for interrupts after resume: {state_error}")
+        # Continue with normal processing if state check fails
+    
+    # Process result the same way as the regular chat endpoint
+    final_message = result["messages"][-1]
+    response_content = final_message.content
+    
+    # Format messages for response
+    messages = [
+        ChatMessage(role="user", content=request.message),
+        ChatMessage(role="assistant", content=response_content)
+    ]
+    
+    response = ChatResponse(
+        response=response_content,
+        session_id=request.session_id,
+        document_info=request.document_info,
+        messages=messages
+    )
+    
+    # Save to conversation history
+    try:
+        async with aiosqlite.connect("checkpoints.db") as conn:
+            # Check if conversation exists, create if not
+            cursor = await conn.execute(
+                "SELECT id FROM conversations WHERE id = ?",
+                (request.session_id,)
+            )
+            conv_row = await cursor.fetchone()
+            
+            if not conv_row:
+                # Create conversation only when first message is sent
+                await conn.execute(
+                    "INSERT INTO conversations (id, title) VALUES (?, ?)",
+                    (request.session_id, f"Conversation {request.session_id[:8]}")
+                )
+            
+            # Save user message
+            await conn.execute(
+                "INSERT INTO messages (conversation_id, role, content) VALUES (?, ?, ?)",
+                (request.session_id, "user", request.message)
+            )
+            
+            # Save assistant response
+            await conn.execute(
+                "INSERT INTO messages (conversation_id, role, content) VALUES (?, ?, ?)",
+                (request.session_id, "assistant", response_content)
+            )
+            
+            # Update conversation timestamp
+            await conn.execute(
+                "UPDATE conversations SET updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (request.session_id,)
+            )
+            
+            await conn.commit()
+    except Exception as e:
+        print(f"Error saving conversation history: {e}")
+        # Don't fail the request if history saving fails
+    
+    return response
+
 
 if __name__ == "__main__":
     import uvicorn

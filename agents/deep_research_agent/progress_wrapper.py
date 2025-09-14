@@ -5,6 +5,7 @@ Wrapper for Local Deep Research Agent with Progress Tracking
 import asyncio
 from typing import Dict, Any, Callable, Optional
 from langchain_core.runnables import RunnableConfig
+from langgraph.errors import GraphInterrupt
 
 from agents.deep_research_agent.deep_researcher import local_deep_researcher
 
@@ -38,7 +39,9 @@ class ProgressTrackingResearcher:
         
         try:
             # Forward to the actual researcher
+            print(f"[ProgressTracking] Calling local_deep_researcher.ainvoke with input: {input}")
             result = await self.researcher.ainvoke(input, config)
+            print(f"[ProgressTracking] local_deep_researcher.ainvoke returned result: {type(result)}")
             
             # Send completion update
             if progress_callback:
@@ -46,8 +49,16 @@ class ProgressTrackingResearcher:
             
             return result
             
+        except GraphInterrupt as e:
+            print(f"[ProgressTracking] Caught GraphInterrupt: {e}")
+            # Send interrupt update
+            if progress_callback:
+                progress_callback("🔄 Waiting for user input...")
+            # Re-raise GraphInterrupt so it can be handled by the calling code
+            raise
         except Exception as e:
-            # Send error update
+            print(f"[ProgressTracking] Caught Exception: {e}")
+            # Send error update for other exceptions
             if progress_callback:
                 progress_callback(f"❌ Research pipeline failed: {str(e)}")
             raise

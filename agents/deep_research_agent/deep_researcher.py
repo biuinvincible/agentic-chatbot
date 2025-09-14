@@ -53,7 +53,7 @@ class TimeoutError(ResearchError):
     pass
 
 from agents.deep_research_agent.prompts import (
-    clarify_with_user_instructions,
+    clarify_with_user_simple_prompt,
     compress_research_simple_human_message,
     compress_research_system_prompt,
     final_report_generation_prompt,
@@ -64,7 +64,6 @@ from agents.deep_research_agent.prompts import (
 from agents.deep_research_agent.state import (
     AgentInputState,
     AgentState,
-    ClarifyWithUser,
     ConductResearch,
     ResearchComplete,
     ResearcherOutputState,
@@ -127,112 +126,96 @@ async def execute_tool_safely(tool, args, config):
         raise ToolExecutionError(error_msg) from e
 
 async def clarify_with_user(state: AgentState, config: RunnableConfig) -> Command[Literal["write_research_brief", "__end__"]]:
-    """Analyze user messages and ask clarifying questions if the research scope is unclear.
+    """Engage in natural conversation with user to clarify research needs.
     
-    This function determines whether the user's request needs clarification before proceeding
-    with research. If clarification is disabled or not needed, it proceeds directly to research.
+    This function allows the LLM to handle clarification in a more conversational,
+    natural way rather than following a strict structured format.
     
     Args:
         state: Current agent state containing user messages
         config: Runtime configuration with model settings and preferences
         
     Returns:
-        Command to either end with a clarifying question or proceed to research brief
+        Command to either continue conversation or proceed to research brief
     """
-    print(f"[DeepResearch] Config received: {config}")
-    # Step 1: Check if clarification is enabled in configuration
+    # print(f"[DeepResearch] *** clarify_with_user called ***")
+    # print(f"[DeepResearch] Config received in clarify_with_user: {config}")
+    
+    # Step 1: Check configuration
     configurable = Configuration.from_runnable_config(config)
-    print(f"[DeepResearch] Configurable: {configurable}")
-    if not configurable.allow_clarification:
-        # Skip clarification step and proceed directly to research
+    # print(f"[DeepResearch] Configurable in clarify_with_user: {configurable}")
+    
+    # Step 2: Check if we should use interactive clarification
+    use_interactive_clarification = getattr(configurable, 'use_interactive_clarification', False)
+    # print(f"[DeepResearch] Interactive clarification enabled in clarify_with_user: {use_interactive_clarification}")
+    
+    # If interactive clarification is disabled, proceed to next step
+    if not use_interactive_clarification:
         return Command(goto="write_research_brief")
     
-    # Step 2: Prepare the model for structured clarification analysis
-    model_config = {
+    # Step 3: Set up the clarification model
+    clarification_model_config = {
         "model": configurable.research_model.replace("google:", ""),
         "max_output_tokens": configurable.research_model_max_tokens,
         "google_api_key": get_api_key_for_model(configurable.research_model, config),
     }
     
-    # Configure model with structured output and enhanced retry logic
-    clarification_model = (
-        init_gemini_model(**model_config)
-        .with_structured_output(ClarifyWithUser)
-        .with_retry(
-            stop_after_attempt=configurable.max_structured_output_retries,
-            wait_exponential_jitter=True
-        )
-    )
+    clarification_model = init_gemini_model(**clarification_model_config)
     
-    # Step 3: Analyze whether clarification is needed
-    prompt_content = clarify_with_user_instructions.format(
-        messages=get_buffer_string(state["messages"]), 
-        date=get_today_str()
-    )
+    # Step 4: Prepare messages for the clarification conversation
+    messages = state.get("messages", [])
+    
+    # Add system prompt to guide the clarification process
+    clarification_messages = [
+        SystemMessage(content=clarify_with_user_simple_prompt.format(date=get_today_str()))
+    ] + messages
     
     try:
+        # Step 5: Generate response from the model
         response = await asyncio.wait_for(
-            clarification_model.ainvoke([HumanMessage(content=prompt_content)]),
+            clarification_model.ainvoke(clarification_messages),
             timeout=float(configurable.timeout_clarification)
         )
-    except asyncio.TimeoutError as e:
-        logger.error("Timeout during clarification analysis")
-        raise TimeoutError(f"Clarification analysis timed out after {configurable.timeout_clarification/60:.1f} minutes. This indicates a very complex initial query analysis.") from e
-    except Exception as e:
-        logger.error(f"Error during clarification analysis: {str(e)}")
-        raise ResearchError(f"Failed to analyze user query: {str(e)}") from e
-    
-    # Step 4: Route based on clarification analysis
-    print(f"[DeepResearch] Clarification analysis result: need_clarification={response.need_clarification}")
-    if response.need_clarification:
-        # Check if we should use interactive clarification (new feature)
-        # For now, we'll add a flag to enable this in the configuration
-        # This maintains backward compatibility while enabling the new feature
-        use_interactive_clarification = getattr(configurable, 'use_interactive_clarification', False)
-        print(f"[DeepResearch] Clarification needed. Interactive clarification enabled: {use_interactive_clarification}")
         
-        if use_interactive_clarification:
-            try:
-                print(f"[DeepResearch] Asking user for clarification: {response.question}")
-                print(f"[DeepResearch] Would interrupt with: {response.question}")
-                
-                # This will pause execution and wait for user input
-                user_clarification = interrupt({
-                    "type": "clarification_request",
-                    "question": response.question,
-                    "session_id": config.get("configurable", {}).get("thread_id", "unknown")
-                })
-                
-                # When resumed, continue with the user's clarification
-                print(f"[DeepResearch] Received user clarification: {user_clarification}")
-                return Command(
-                    goto="write_research_brief", 
-                    update={"messages": [AIMessage(content=str(user_clarification))]}
-                )
-            except GraphInterrupt:
-                # Re-raise GraphInterrupt to let it propagate to the backend
-                print(f"[DeepResearch] Propagating GraphInterrupt")
-                raise
-            except Exception as interrupt_error:
-                # If interrupt fails or is not available, fall back to the original behavior
-                print(f"[DeepResearch] Interactive clarification failed, falling back: {interrupt_error}")
-                return Command(
-                    goto=END, 
-                    update={"messages": [AIMessage(content=response.question)]}
-                )
-        else:
-            print(f"[DeepResearch] Not using interactive clarification, returning question: {response.question}")
-            # Original behavior - end with clarifying question for user
+        # Step 6: Check if the model indicates readiness to proceed with research
+        response_content = response.content if hasattr(response, 'content') else str(response)
+        print(f"[DeepResearch] Clarification response content: {response_content[:200]}...")
+        
+        # If the model indicates readiness, proceed to research brief
+        if "i'm ready to begin" in response_content.lower() or "ready to begin" in response_content.lower():
+            print(f"[DeepResearch] Model indicates readiness to begin research")
+            # Extract the research topic from the conversation
             return Command(
-                goto=END, 
-                update={"messages": [AIMessage(content=response.question)]}
+                goto="write_research_brief",
+                update={"messages": [response]}
             )
-    else:
-        print(f"[DeepResearch] No clarification needed, proceeding with verification: {response.verification}")
-        # Proceed to research with verification message
+        else:
+            print(f"[DeepResearch] Sending interrupt to wait for user input")
+            print(f"[DeepResearch] Interrupt content: {response_content[:200]}...")
+            # Interrupt the workflow to wait for user input
+            interrupt_result = interrupt(response_content)
+            print(f"[DeepResearch] Created interrupt: {interrupt_result}")
+            return interrupt_result
+            
+    except asyncio.TimeoutError as e:
+        logger.error("Timeout during clarification")
+        error_message = "Sorry, the clarification process timed out. Let me proceed with the research based on what I understand so far."
         return Command(
-            goto="write_research_brief", 
-            update={"messages": [AIMessage(content=response.verification)]}
+            goto="write_research_brief",
+            update={"messages": [AIMessage(content=error_message)]}
+        )
+    except Exception as e:
+        # Check if this is a GraphInterrupt exception - if so, re-raise it
+        # The interrupt() function raises GraphInterrupt, which should propagate up
+        if "GraphInterrupt" in str(type(e).__name__):
+            # Re-raise GraphInterrupt exceptions so they can be handled by the calling code
+            raise
+        
+        logger.error(f"Error during clarification: {str(e)}")
+        error_message = "I encountered an issue during the clarification process. Let me proceed with the research based on the available information."
+        return Command(
+            goto="write_research_brief",
+            update={"messages": [AIMessage(content=error_message)]}
         )
 
 

@@ -13,6 +13,7 @@ from langchain_core.messages import (
 )
 from pydantic import BaseModel, Field
 from langgraph.graph import StateGraph
+from langgraph.errors import GraphInterrupt
 
 # Import the local deep research implementation
 from agents.deep_research_agent.deep_researcher import local_deep_researcher
@@ -70,10 +71,14 @@ async def deep_research_agent(state: dict, llm=None) -> dict:
         # Prepare configuration - pass through the main configuration if available
         if "config" in state:
             config = state["config"]
+            print(f"[DeepResearch] Config from state: {config}")
             # Ensure thread_id is set
             if "configurable" not in config:
                 config["configurable"] = {}
             config["configurable"]["thread_id"] = session_id
+            # Ensure use_interactive_clarification is set
+            config["configurable"]["use_interactive_clarification"] = True
+            print(f"[DeepResearch] Updated config: {config}")
         else:
             config = {
                 "configurable": {
@@ -81,6 +86,7 @@ async def deep_research_agent(state: dict, llm=None) -> dict:
                     "use_interactive_clarification": True  # Enable interactive clarification by default
                 }
             }
+            print(f"[DeepResearch] Created new config: {config}")
         
         # Prepare input for deep_researcher_local_deep_research
         research_input = {
@@ -91,8 +97,18 @@ async def deep_research_agent(state: dict, llm=None) -> dict:
         if "document_info" in state:
             research_input["document_info"] = state["document_info"]
         
+        print(f"[DeepResearch] About to call progress_tracking_researcher.ainvoke with config: {config}")
         # Run the enhanced local deep research agent with progress tracking
         result = await progress_tracking_researcher.ainvoke(research_input, config)
+        print(f"[DeepResearch] Returned from progress_tracking_researcher.ainvoke")
+        print(f"[DeepResearch] Result type: {type(result)}")
+        print(f"[DeepResearch] Result keys: {result.keys() if isinstance(result, dict) else 'Not a dict'}")
+        
+        # Check if result contains interrupt
+        if isinstance(result, dict) and "__interrupt__" in result:
+            print(f"[DeepResearch] Result contains interrupt: {result['__interrupt__']}")
+            # Propagate the interrupt so backend can handle it
+            raise GraphInterrupt(result["__interrupt__"])
         
         # Extract the final report - try multiple approaches for robustness
         final_report = ""
@@ -136,6 +152,10 @@ async def deep_research_agent(state: dict, llm=None) -> dict:
             "final_report": final_report
         }
         
+    except GraphInterrupt:
+        # Re-raise GraphInterrupt so it can be handled by the backend API
+        print(f"[DeepResearch] Propagating GraphInterrupt to backend")
+        raise
     except Exception as e:
         print(f"[DeepResearch] Error: {e}")
         import traceback
@@ -241,6 +261,11 @@ You must respond with a structured JSON object containing:
 def supervisor_agent(state: UnifiedState, llm) -> dict:
     """Enhanced supervisor agent that primarily relies on LLM-based decision making with minimal essential rules."""
     print("[Supervisor] Analyzing request and routing...")
+    
+    # Check if we're in an interrupt state
+    if state.get("interrupt_in_progress"):
+        print("[Supervisor] Interrupt in progress, routing to final response agent")
+        return {"next": "final_response_agent"}
     
     # ESSENTIAL RULE-BASED CHECKS (cannot be delegated to LLM)
     
@@ -543,8 +568,19 @@ def create_agent_graph(llm, final_response_llm=None) -> StateGraph:
     
     # Add nodes for each agent
     async def _deep_research_node(state: dict):
-        result = await deep_research_agent(state, llm)
-        return result
+        print(f"[Supervisor] *** About to call deep_research_agent with state: {state}")
+        try:
+            result = await deep_research_agent(state, llm)
+            print(f"[Supervisor] deep_research_agent returned: {result}")
+            return result
+        except GraphInterrupt as e:
+            # Re-raise GraphInterrupt so it can be handled by the backend API
+            print("[Supervisor] *** Propagating GraphInterrupt from deep research agent")
+            print(f"[Supervisor] GraphInterrupt: {e}")
+            # Set a flag in the state to indicate that we're in an interrupt state
+            # This will prevent the supervisor from routing back to the deep research agent
+            state["interrupt_in_progress"] = True
+            raise
     
     async def _supervisor_node(state: dict):
         result = supervisor_agent(state, llm)

@@ -357,12 +357,12 @@ class Configuration(BaseModel):
     )
 
     use_interactive_clarification: bool = Field(
-        default=False,
+        default=True,
         metadata={
             "x_oap_ui_config": {
                 "type": "boolean",
-                "default": False,
-                "description": "Whether to use interactive clarification that waits for user input during research"
+                "default": True,
+                "description": "Whether to use interactive clarification that allows natural conversation with the user during research"
             }
         }
     )
@@ -374,11 +374,13 @@ class Configuration(BaseModel):
     ) -> "Configuration":
         """Create a Configuration instance from a RunnableConfig."""
         configurable = config.get("configurable", {}) if config else {}
+        # print(f"[Configuration] Configurable from config: {configurable}")
         field_names = list(cls.model_fields.keys())
         values: dict[str, Any] = {
             field_name: os.environ.get(field_name.upper(), configurable.get(field_name))
             for field_name in field_names
         }
+        # print(f"[Configuration] Values before processing: {values}")
         # Handle enum fields
         if values.get("search_api") and isinstance(values["search_api"], str):
             try:
@@ -391,6 +393,7 @@ class Configuration(BaseModel):
         if values.get("mcp_config") and isinstance(values["mcp_config"], dict):
             values["mcp_config"] = MCPConfig(**values["mcp_config"])
             
+        # print(f"[Configuration] Final values: {values}")
         return cls(**{k: v for k, v in values.items() if v is not None})
 
     @classmethod

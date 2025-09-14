@@ -29,7 +29,7 @@ def get_today_str():
 async def deep_researcher_agent(state: dict, llm=None) -> dict:
     """Main entry point for the local deep research agent."""
     try:
-        print("=== DEEP RESEARCHER AGENT: Local Deep Research Implementation ===")
+        # print("=== DEEP RESEARCHER AGENT: Local Deep Research Implementation ===")
         
         # Prepare input for the local deep research agent
         input_messages = state.get("messages", [])
@@ -58,7 +58,7 @@ async def deep_researcher_agent(state: dict, llm=None) -> dict:
         final_report = result.get("final_report", "Research completed.")
         final_message = AIMessage(content=final_report, name="DeepResearcherAgent")
         
-        print("=== DEEP RESEARCHER COMPLETED ===")
+        # print("=== DEEP RESEARCHER COMPLETED ===")
         
         # Report outcome for supervisor routing
         outcome_info = {
@@ -75,7 +75,7 @@ async def deep_researcher_agent(state: dict, llm=None) -> dict:
         }
         
     except Exception as e:
-        print(f"Error in deep research: {e}")
+        # print(f"Error in deep research: {e}")
         import traceback
         traceback.print_exc()
         error_msg = f"Error during deep research: {str(e)}"

@@ -24,14 +24,14 @@ DEFAULT_CONFIG = {
     "search_api": "tavily",
     "api_request_delay": 1.0,  # Increased delay to help with rate limiting
     "max_api_retries": 5,  # Increased retries for rate limit handling
-    "timeout_clarification": 300,      # 5 minutes (increased from 60)
-    "timeout_research_brief": 600,     # 10 minutes (increased from 120)
+    "timeout_clarification": 1800,     # 30 minutes (increased from 60)
+    "timeout_research_brief": 1800,    # 30 minutes (increased from 120)
     "timeout_supervisor": 1800,        # 30 minutes (increased from 300)
     "timeout_researcher": 1800,        # 30 minutes (increased from 300)
-    "timeout_tool_call": 300,          # 5 minutes (increased from 120)
-    "timeout_research_task": 3600,     # 60 minutes (increased from 300)
+    "timeout_tool_call": 1800,         # 30 minutes (increased from 120)
+    "timeout_research_task": 1800,     # 30 minutes (increased from 300)
     "timeout_compression": 1800,       # 30 minutes (increased from 240)
-    "timeout_final_report": 7200       # 120 minutes (2 hours) (increased from 600)
+    "timeout_final_report": 1800       # 30 minutes (2 hours) (increased from 600)
 }
 
 def get_default_config():
