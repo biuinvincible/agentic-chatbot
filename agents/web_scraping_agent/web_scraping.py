@@ -43,11 +43,42 @@ def web_scraping_agent(state: UnifiedState, llm) -> UnifiedState:  # Return Unif
     # Get the last 6 messages for context (excluding the current message)
     conversation_context_messages = state["messages"][-7:-1]  # Last 6 messages excluding current
     
-    # Extract URLs from the message content (assuming they're in a list format)
-    # This is a simple regex-based approach; in a real implementation, you might want to parse more carefully
-    import re
-    urls = re.findall(r'https?://[^\s]+', original_query)
+    # Enhanced URL extraction function that handles trailing punctuation and deduplication
+    def extract_urls(text):
+        """Extract URLs from text with a reliable approach."""
+        if not text:
+            return []
+        
+        # First, find all potential URLs
+        potential_urls = re.findall(r'https?://[^\s]+', text)
+        
+        # Then clean each one by removing trailing punctuation
+        cleaned_urls = []
+        for url in potential_urls:
+            # Remove trailing commas, periods, semicolons, and closing parentheses
+            clean_url = re.sub(r'[,.;:\)]+$', '', url)
+            # Only add non-empty URLs
+            if clean_url:
+                cleaned_urls.append(clean_url)
+        
+        # Deduplicate while preserving order
+        seen = set()
+        unique_urls = []
+        for url in cleaned_urls:
+            if url not in seen:
+                seen.add(url)
+                unique_urls.append(url)
+        
+        return unique_urls
     
+    # Extract URLs from both the last message and supervisor's task description
+    urls_from_query = extract_urls(original_query)
+    urls_from_task = extract_urls(task_description) if task_description else []
+    
+    # Combine and deduplicate URLs
+    urls = list(dict.fromkeys(urls_from_query + urls_from_task))  # Preserves order and removes duplicates
+    
+    # Fallback: Check if it's search results we need to parse
     if not urls:
         # If no URLs found in the message, check if it's search results we need to parse
         if "Search results for" in original_query:
